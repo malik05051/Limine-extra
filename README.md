@@ -11,3 +11,13 @@
 Limine (pronounced as demonstrated [here](https://www.merriam-webster.com/dictionary/in%20limine))
 is a modern, secure, portable, multiprotocol bootloader and boot manager, also used
 as the reference implementation for the [Limine boot protocol](https://github.com/Limine-Bootloader/limine-protocol/blob/trunk/PROTOCOL.md). The difference is that more features via bootctl are added.
+
+### Releases and packages
+
+Releases are tagged `vX.Y.Z-extra` from v12.9.3 onwards, and were tagged `vX.Y.Z-modified`
+before. The loader reports the release it was built from, e.g. `Limine 12.9.3-extra`, which
+is based on Limine 12.9.1.
+
+On Arch Linux, the [`limine-extra`](https://github.com/malik05051/malik05-repo/tree/main/limine-extra)
+package from the [malik05 repository](https://github.com/malik05051/malik05-repo) replaces
+Arch's `limine` with these releases. It was previously named `limine-systemd-bootctl`.
