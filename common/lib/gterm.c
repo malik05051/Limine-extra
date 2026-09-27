@@ -350,10 +350,6 @@ static uint32_t blend_gradient_from_box(struct fb_info *fb, size_t x, size_t y, 
     return colour_blend((hex & 0xffffff) | (new_alpha << 24), bg_px);
 }
 
-typedef size_t fixedp6; // the last 6 bits are the fixed point part
-static size_t fixedp6_to_int(fixedp6 value) { return value / 64; }
-static fixedp6 int_to_fixedp6(size_t value) { return value * 64; }
-
 // Draw rect at coordinates, copying from the image to the fb and canvas, applying fn on every pixel
 __attribute__((always_inline)) static inline void genloop(struct fb_info *fb, size_t xstart, size_t xend, size_t ystart, size_t yend, uint32_t (*blend)(struct fb_info *fb, size_t x, size_t y, uint32_t orig)) {
     uint8_t *img = background->img;
@@ -411,25 +407,29 @@ __attribute__((always_inline)) static inline void genloop(struct fb_info *fb, si
             }
         }
         break;
-    // For every pixel, ratio = img_width / gterm_width, img_x = x * ratio, x = (xstart + i)
-    // hence x = xstart * ratio + i * ratio
-    // so you can set x = xstart * ratio, and increment by ratio at each iteration
-    case IMAGE_STRETCHED:
+    case IMAGE_STRETCHED: {
+        // 32.32 fixed point spares a division per pixel. Bumping the floored
+        // step makes every sample exact for widths up to 65536. A step below
+        // the width skips the bump, which could then overrun the image.
+        uint64_t x_step = ((uint64_t)img_width << 32) / fb->framebuffer_width;
+        if (x_step >= fb->framebuffer_width) {
+            x_step++;
+        }
         for (size_t y = ystart; y < yend; y++) {
             size_t img_y = (y * img_height) / fb->framebuffer_height; // calculate Y with full precision
             size_t off = img_pitch * img_y;
             size_t canvas_off = fb->framebuffer_width * y;
 
-            size_t ratio = int_to_fixedp6(img_width) / fb->framebuffer_width;
-            fixedp6 img_x = ratio * xstart;
+            uint64_t img_x = x_step * xstart;
             for (size_t x = xstart; x < xend; x++) {
-                uint32_t img_pixel = *(uint32_t*)(img + fixedp6_to_int(img_x) * colsize + off);
+                uint32_t img_pixel = *(uint32_t*)(img + (size_t)(img_x >> 32) * colsize + off);
                 uint32_t i = blend(fb, x, y, img_pixel);
                 bg_canvas[canvas_off + x] = i;
-                img_x += ratio;
+                img_x += x_step;
             }
         }
         break;
+    }
     }
 }
 

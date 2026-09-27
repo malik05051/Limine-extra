@@ -1070,6 +1070,10 @@ static int bios_install(int argc, char *argv[]) {
             return EXIT_FAILURE;
         } else {
             if (device != NULL) { // [GPT partition index]
+                if (part_ndx != NULL) {
+                    bios_install_usage();
+                    goto uninstall_mode_cleanup;
+                }
                 part_ndx = argv[i]; // TODO: Make this non-positional?
             } else if ((device = fopen(argv[i], "r+b")) == NULL) { // <device>
                 perror_wrap("error: `%s`", argv[i]);
@@ -1768,24 +1772,26 @@ bios_boot_autodetected:;
     if (!device_flush_cache())
         goto cleanup;
 
-    if (!quiet) {
+    ok = EXIT_SUCCESS;
+
+cleanup:
+    reverse_uninstall_data();
+    // An install whose uninstall data could not be saved is undone too: a
+    // rerun would record the installed sectors as the originals.
+    if (ok == EXIT_SUCCESS && uninstall_file != NULL
+     && !store_uninstall_data(uninstall_file)) {
+        ok = EXIT_FAILURE;
+    }
+    if (ok != EXIT_SUCCESS) {
+        // If we failed, attempt to reverse install process
+        fprintf(stderr, "Install failed, undoing work...\n");
+        uninstall(true);
+    } else if (!quiet) {
         fprintf(stderr, "Reminder: Remember to copy the limine-bios.sys file in either\n"
                         "          the root, /boot, /limine, or /boot/limine directories of\n"
                         "          one of the partitions on the device, or boot will fail!\n");
 
         fprintf(stderr, "Limine BIOS stages installed successfully.\n");
-    }
-
-    ok = EXIT_SUCCESS;
-
-cleanup:
-    reverse_uninstall_data();
-    if (ok != EXIT_SUCCESS) {
-        // If we failed, attempt to reverse install process
-        fprintf(stderr, "Install failed, undoing work...\n");
-        uninstall(true);
-    } else if (uninstall_file != NULL) {
-        store_uninstall_data(uninstall_file);
     }
 uninstall_mode_cleanup:
     free_uninstall_data();
@@ -1848,6 +1854,12 @@ static int enroll_config(int argc, char *argv[]) {
 #ifdef IS_WINDOWS
         system("pause");
 #endif
+        return EXIT_FAILURE;
+    }
+
+    // The usage names a hash even for --reset, which ignores it.
+    if (argc > 3) {
+        enroll_config_usage();
         return EXIT_FAILURE;
     }
 
