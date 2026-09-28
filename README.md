@@ -6,6 +6,9 @@
 
 # IMPORTANT NOTE : The commits I make are vibecoded by Claude Code and verified by myself and tested before making it as a release.
 
+> [!IMPORTANT]
+> Packages releases are on the [GitHub pacman repo](https://github.com/malik05051/malik05-repo).
+
 ### What is the difference with the official Limine?
 
 Limine (pronounced as demonstrated [here](https://www.merriam-webster.com/dictionary/in%20limine))
