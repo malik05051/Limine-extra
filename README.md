@@ -10,7 +10,7 @@
 
 Limine (pronounced as demonstrated [here](https://www.merriam-webster.com/dictionary/in%20limine))
 is a modern, secure, portable, multiprotocol bootloader and boot manager, also used
-as the reference implementation for the [Limine boot protocol](https://github.com/Limine-Bootloader/limine-protocol/blob/trunk/PROTOCOL.md). The difference is that more features via bootctl are added.
+as the reference implementation for the [Limine boot protocol](https://github.com/Limine-Bootloader/limine-protocol/blob/trunk/PROTOCOL.md). The difference is that there are extra features like more bootctl features, timeshift integration and more to come !
 
 ### Releases and packages
 
