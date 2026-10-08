@@ -1,6 +1,9 @@
 .SUFFIXES:
 .DELETE_ON_ERROR:
 
+# Keep cd from picking a same-named directory out of CDPATH.
+unexport CDPATH
+
 # Keep git from being pointed at another repository, as happens in hooks.
 unexport GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
 
@@ -174,8 +177,6 @@ clean: tools-clean limine-bios-clean limine-uefi-ia32-clean limine-uefi-x86-64-c
 install: all
 	$(INSTALL) -d '$(call SHESCAPE,$(DESTDIR)$(docdir))'
 	$(INSTALL_DATA) '$(call SHESCAPE,$(SRCDIR))/COPYING' '$(call SHESCAPE,$(DESTDIR)$(docdir))/'
-	$(INSTALL) -d '$(call SHESCAPE,$(DESTDIR)$(docdir))/LICENSES'
-	$(INSTALL_DATA) '$(call SHESCAPE,$(SRCDIR))/LICENSES/LicenseRef-scancode-bsd-no-disclaimer-unmodified.txt' '$(call SHESCAPE,$(DESTDIR)$(docdir))/LICENSES/'
 	$(INSTALL_DATA) '$(call SHESCAPE,$(SRCDIR))/3RDPARTY.md' '$(call SHESCAPE,$(DESTDIR)$(docdir))/'
 	$(INSTALL_DATA) '$(call SHESCAPE,$(SRCDIR))/CONFIG.md' '$(call SHESCAPE,$(DESTDIR)$(docdir))/'
 	$(INSTALL_DATA) '$(call SHESCAPE,$(SRCDIR))/FAQ.md' '$(call SHESCAPE,$(DESTDIR)$(docdir))/'
@@ -221,7 +222,6 @@ install-strip: install
 .PHONY: uninstall
 uninstall:
 	rm -f '$(call SHESCAPE,$(DESTDIR)$(docdir))/COPYING'
-	rm -rf '$(call SHESCAPE,$(DESTDIR)$(docdir))/LICENSES'
 	rm -f '$(call SHESCAPE,$(DESTDIR)$(docdir))/3RDPARTY.md'
 	rm -f '$(call SHESCAPE,$(DESTDIR)$(docdir))/CONFIG.md'
 	rm -f '$(call SHESCAPE,$(DESTDIR)$(docdir))/FAQ.md'
@@ -366,8 +366,8 @@ dist:
 	rm -rf '$(call SHESCAPE,$(BUILDDIR))'/"$(DIST_OUTPUT)/logo.png"
 	rm -rf '$(call SHESCAPE,$(BUILDDIR))'/"$(DIST_OUTPUT)/screenshot.png"
 	echo "$(PACKAGE_VERSION)" > '$(call SHESCAPE,$(BUILDDIR))'/"$(DIST_OUTPUT)/version"
-	cd '$(call SHESCAPE,$(BUILDDIR))' && find "$(DIST_OUTPUT)" ! -type d -perm -100 -exec chmod 755 '{}' +
-	cd '$(call SHESCAPE,$(BUILDDIR))' && find "$(DIST_OUTPUT)" ! -type d ! -perm -100 -exec chmod 644 '{}' +
+	cd '$(call SHESCAPE,$(BUILDDIR))' && find "$(DIST_OUTPUT)" -type f -perm -100 -exec chmod 755 '{}' +
+	cd '$(call SHESCAPE,$(BUILDDIR))' && find "$(DIST_OUTPUT)" -type f ! -perm -100 -exec chmod 644 '{}' +
 	cd '$(call SHESCAPE,$(BUILDDIR))' && TZ=UTC0 find "$(DIST_OUTPUT)" -exec touch -t $(SOURCE_DATE_EPOCH_TOUCH) '{}' +
 	cd '$(call SHESCAPE,$(BUILDDIR))' && tar -cf "$(DIST_OUTPUT).tar" $$(find "$(DIST_OUTPUT)" ! -type d | LC_ALL=C sort)
 	cd '$(call SHESCAPE,$(BUILDDIR))' && gzip -n < "$(DIST_OUTPUT).tar" > "$(DIST_OUTPUT).tar.gz"

@@ -41,7 +41,9 @@ with no extensions must be used.
 
 ### Generic style
 
-- Use British spelling.
+- Use British spelling, except for "license", which is conventionally spelled that way even
+  as a noun.
+- Use the Oxford comma whenever possible.
 - No hard tabs. Spaces for indentation and alignment. 4-space per indentation level.
 - Always avoid vertical alignment to minimise vertical blast radius on changes.
 - Comments are sparse: explain a non-obvious *why*, never restate the *what*. Don't narrate;
@@ -51,8 +53,10 @@ with no extensions must be used.
 - Stick to ASCII: avoid em-dashes and other non-ASCII characters in code, comments, commit
   messages, and documentation, unless the non-ASCII character is essential to the work.
 - Do not add per-file license headers.
-- Do not edit vendored/fetched/generated files (i.e. anything in `3RDPARTY.md`, or not in
-  `git ls-files`).
+- Do not edit fetched, generated, or vendored files: anything not in `git ls-files`, which
+  includes everything `./bootstrap` pulls in, and files checked in unchanged from another
+  project, such as the autoconf-archive macros in `m4/`. Code adapted from other projects
+  within the tree may be edited like any other, but keep its license notices intact.
 - As a catch-all, match the surrounding code: indentation, braces, naming, idiom. Mirror the
   conventions used by the file you edit.
 
@@ -144,8 +148,8 @@ it to go here. All of the following answer "no", so none of them earn a body:
 - Narrating what the diff plainly shows.
 - Repeating a comment the same diff adds to the code. Say it once, in the comment, where it
   stays beside the code and stops the mistake being repeated.
-- Arguing the change is correct, safe or tested.
-- Recounting how the bug was found, reproduced or measured.
+- Arguing the change is correct, safe, or tested.
+- Recounting how the bug was found, reproduced, or measured.
 
 A body is earned when the *why* lives outside the diff and outside this repository: the
 semantics of an external interface our headers merely `#define`, a hardware or firmware
@@ -163,7 +167,7 @@ The flag asserts screen_info was not filled from firmware data, so
 Linux skips its DMI framebuffer fixups. Ours comes from GOP.
 ```
 
-Not earned, despite being within the three-line cap. The cap is a ceiling, not a licence:
+Not earned, despite being within the three-line cap. The cap is a ceiling, not a license:
 everything here is recoverable from the diff, so the subject should have stood alone.
 
 ```
