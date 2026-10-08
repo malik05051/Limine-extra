@@ -11,6 +11,7 @@ struct iso9660_context {
     struct volume *vol;
     void *root;
     uint32_t root_size;
+    int susp_skip;
 };
 
 struct iso9660_extent {
@@ -190,6 +191,109 @@ static bool iso9660_cache_root(struct volume *vol,
     return true;
 }
 
+// A looping chain would never end otherwise.
+#define ISO9660_MAX_CONTINUATIONS 32
+
+struct iso9660_susp_iter {
+    struct volume *vol;
+    uint8_t *area;
+    size_t size;
+    uint8_t *continuation;
+    size_t hops;
+    uint32_t ce_lba;
+    uint32_t ce_offset;
+    uint32_t ce_size;
+};
+
+static uint8_t *iso9660_susp_next(struct iso9660_susp_iter *iter) {
+    for (;;) {
+        // An entry holds at least its signature, length and version, the
+        // latter defined by its extension and so checked by whatever reads it.
+        if (iter->size >= 4 && iter->area[2] >= 4 && iter->area[2] <= iter->size) {
+            uint8_t *entry = iter->area;
+            iter->area += entry[2];
+            iter->size -= entry[2];
+            // ST ends this area, but a CE recorded before it still continues
+            // the chain.
+            if (entry[0] == 'S' && entry[1] == 'T' && entry[3] == 1) {
+                iter->size = 0;
+                continue;
+            }
+            if (entry[0] == 'C' && entry[1] == 'E' && entry[2] == 28 && entry[3] == 1) {
+                struct BE32_t *ce = (struct BE32_t *)(entry + 4);
+                iter->ce_lba = ce[0].little;
+                iter->ce_offset = ce[1].little;
+                iter->ce_size = ce[2].little;
+            }
+            return entry;
+        }
+
+        // Writers chain a new area rather than cross a block, which Linux
+        // also refuses.
+        if (iter->ce_size == 0 || iter->hops == ISO9660_MAX_CONTINUATIONS
+         || iter->ce_offset >= ISO9660_SECTOR_SIZE
+         || iter->ce_size > ISO9660_SECTOR_SIZE - iter->ce_offset) {
+            return NULL;
+        }
+        if (iter->continuation == NULL) {
+            iter->continuation = ext_mem_alloc(ISO9660_SECTOR_SIZE);
+        }
+        uint64_t loc = (uint64_t)iter->ce_lba * ISO9660_SECTOR_SIZE + iter->ce_offset;
+        if (!volume_read(iter->vol, iter->continuation, loc, iter->ce_size)) {
+            return NULL;
+        }
+        iter->area = iter->continuation;
+        iter->size = iter->ce_size;
+        iter->ce_size = 0;
+        iter->hops++;
+    }
+}
+
+// RRIP is recorded through SUSP, so names need both the SP entry opening the
+// root's own record and an ER entry naming RRIP among that record's entries.
+// The cached root spans at least a sector, and a sector holds any record.
+static int iso9660_susp_skip(struct iso9660_context *context) {
+    struct iso9660_directory_entry *entry = context->root;
+    size_t offset = sizeof(*entry) + 1;
+
+    if (entry->length < offset + 7 || entry->filename_size != 1
+     || entry->name[0] != 0) {
+        return -1;
+    }
+
+    uint8_t *system_use = (uint8_t *)entry + offset;
+    if (system_use[0] != 'S' || system_use[1] != 'P'
+     || system_use[2] != 7 || system_use[3] != 1
+     || system_use[4] != 0xbe || system_use[5] != 0xef) {
+        return -1;
+    }
+
+    int skip = -1;
+    struct iso9660_susp_iter iter = {
+        .vol = context->vol,
+        .area = system_use,
+        .size = entry->length - offset,
+    };
+    uint8_t *susp;
+    while ((susp = iso9660_susp_next(&iter)) != NULL) {
+        if (susp[0] != 'E' || susp[1] != 'R' || susp[3] != 1 || susp[2] < 8
+         || susp[2] != 8 + susp[4] + susp[5] + susp[6]) {
+            continue;
+        }
+        // RRIP 4.3 gives RRIP_1991A, and writers of RRIP 1.12 use
+        // IEEE_P1282 or IEEE_1282.
+        if ((susp[4] == 10 && memcmp(susp + 8, "RRIP_1991A", 10) == 0)
+         || (susp[4] == 10 && memcmp(susp + 8, "IEEE_P1282", 10) == 0)
+         || (susp[4] == 9 && memcmp(susp + 8, "IEEE_1282", 9) == 0)) {
+            skip = system_use[6];
+            break;
+        }
+    }
+    pmm_free(iter.continuation, ISO9660_SECTOR_SIZE);
+
+    return skip;
+}
+
 static struct iso9660_context *iso9660_get_context(struct volume *vol) {
     struct iso9660_contexts_node *current = contexts;
     while (current) {
@@ -205,13 +309,20 @@ static struct iso9660_context *iso9660_get_context(struct volume *vol) {
         pmm_free(node, sizeof(struct iso9660_contexts_node));
         return NULL;
     }
+    node->context.susp_skip = iso9660_susp_skip(&node->context);
 
     node->next = contexts;
     contexts = node;
     return &node->context;
 }
 
-static bool load_name(char *buf, size_t limit, struct iso9660_directory_entry *entry) {
+static bool load_name(char *buf, size_t limit, struct iso9660_directory_entry *entry,
+                      struct iso9660_context *context) {
+    int susp_skip = context->susp_skip;
+    if (susp_skip < 0) {
+        goto use_iso_name;
+    }
+
     // Validate entry->length is large enough
     if (entry->length < sizeof(struct iso9660_directory_entry) + entry->filename_size) {
         goto use_iso_name;
@@ -226,31 +337,40 @@ static bool load_name(char *buf, size_t limit, struct iso9660_directory_entry *e
         sysarea++;
         sysarea_len--;
     }
+    if ((size_t)susp_skip > sysarea_len) {
+        goto use_iso_name;
+    }
+    sysarea += susp_skip;
+    sysarea_len -= susp_skip;
 
     // Accumulate Rock Ridge name from possibly multiple NM entries
     size_t name_len = 0;
     bool found_nm = false;
-    while ((sysarea_len >= 4) && (sysarea[3] == 1)) {
-        if (sysarea[2] > sysarea_len || sysarea[2] == 0) {
-            break;
-        }
-        if (sysarea[0] == 'N' && sysarea[1] == 'M' && sysarea[2] >= 5) {
-            size_t frag_len = sysarea[2] - 5;
+    struct iso9660_susp_iter iter = {
+        .vol = context->vol,
+        .area = sysarea,
+        .size = sysarea_len,
+    };
+    uint8_t *susp;
+    while ((susp = iso9660_susp_next(&iter)) != NULL) {
+        if (susp[0] == 'N' && susp[1] == 'M' && susp[2] >= 5 && susp[3] == 1) {
+            size_t frag_len = susp[2] - 5;
+            // Continuation Areas let a name outgrow any path component.
             if (name_len + frag_len >= limit) {
-                panic(false, "iso9660: Filename size exceeded");
+                found_nm = false;
+                break;
             }
-            memcpy(buf + name_len, sysarea + 5, frag_len);
+            memcpy(buf + name_len, susp + 5, frag_len);
             name_len += frag_len;
             found_nm = true;
 
             // Check CONTINUE flag (bit 0 of flags byte at offset 4)
-            if (!(sysarea[4] & 1)) {
+            if (!(susp[4] & 1)) {
                 break;
             }
         }
-        sysarea_len -= sysarea[2];
-        sysarea += sysarea[2];
     }
+    pmm_free(iter.continuation, ISO9660_SECTOR_SIZE);
 
     if (found_nm) {
         buf[name_len] = 0;
@@ -330,7 +450,8 @@ static struct iso9660_directory_entry *iso9660_next_entry(void *current, void *b
     return entry;
 }
 
-static struct iso9660_directory_entry *iso9660_find(void *buffer, uint32_t size, const char *filename) {
+static struct iso9660_directory_entry *iso9660_find(void *buffer, uint32_t size,
+                                                    const char *filename, struct iso9660_context *context) {
     while (size) {
         struct iso9660_directory_entry *entry = buffer;
 
@@ -361,8 +482,18 @@ static struct iso9660_directory_entry *iso9660_find(void *buffer, uint32_t size,
             return NULL;  // Corrupted directory entry
         }
 
+        // ECMA-119 8.6.2 reserves these for a directory's own and parent
+        // records, which no path component names, whatever an NM claims.
+        if (entry->filename_size == 1
+         && entry->length > sizeof(struct iso9660_directory_entry)
+         && (uint8_t)entry->name[0] <= 1) {
+            size -= entry->length;
+            buffer += entry->length;
+            continue;
+        }
+
         char entry_filename[256];
-        bool rr = load_name(entry_filename, 256, entry);
+        bool rr = load_name(entry_filename, 256, entry, context);
 
         if (rr && !case_insensitive_fopen) {
             if (strcmp(filename, entry_filename) == 0) {
@@ -443,7 +574,8 @@ struct file_handle *iso9660_open(struct volume *vol, const char *path) {
         }
         *aux = '\0';
 
-        struct iso9660_directory_entry *entry = iso9660_find(current, current_size, filename);
+        struct iso9660_directory_entry *entry = iso9660_find(current, current_size,
+                                                             filename, ret->context);
         if (!entry) {
             if (!first) {
                 pmm_free(current, current_size);
@@ -476,7 +608,7 @@ struct file_handle *iso9660_open(struct volume *vol, const char *path) {
             // still populates the buffer; treat an empty buffer as the only
             // "no usable name" case.
             char base_name[256];
-            load_name(base_name, sizeof(base_name), entry);
+            load_name(base_name, sizeof(base_name), entry, ret->context);
 
             while (e->flags & ISO9660_FLAG_MULTI_EXTENT) {
                 struct iso9660_directory_entry *next = iso9660_next_entry(e, buffer_end);
@@ -486,7 +618,7 @@ struct file_handle *iso9660_open(struct volume *vol, const char *path) {
                 // the file identifier of the first record. Refuse to splice
                 // in unrelated entries.
                 char next_name[256];
-                load_name(next_name, sizeof(next_name), next);
+                load_name(next_name, sizeof(next_name), next, ret->context);
                 if (base_name[0] == '\0' || strcmp(base_name, next_name) != 0) {
                     break;
                 }

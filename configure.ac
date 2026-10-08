@@ -11,9 +11,11 @@ BUILDDIR="$(pwd -P)"
 # '&' otherwise yields an empty GNUmakefile with configure still exiting 0, and
 # '=' makes make recurse without bound. '*' and '?' work from make 3.82
 # onwards, but macOS still ships 3.81.
+AC_MSG_CHECKING([whether the source and build directory paths are usable])
 for bad_char in '"' "'" ':' '`' '#' '$' '&' ';' '|' '='; do
     case "$SRCDIR" in
         *"$bad_char"*)
+            AC_MSG_RESULT([no])
             AC_MSG_ERROR([the source directory path contains '$bad_char'; move the source tree])
             ;;
     esac
@@ -22,14 +24,17 @@ done
 for bad_char in "'" '%' ':' '#' '$' '&' ';' '|' '=' '*' '?'; do
     case "$BUILDDIR" in
         *"$bad_char"*)
+            AC_MSG_RESULT([no])
             AC_MSG_ERROR([the build directory path contains '$bad_char'; use a different build directory])
             ;;
     esac
 done
 
 if test "$(printf '%s' "$SRCDIR$BUILDDIR" | wc -l)" -gt 0; then
+    AC_MSG_RESULT([no])
     AC_MSG_ERROR([the source or build directory path contains a newline; move the tree])
 fi
+AC_MSG_RESULT([yes])
 
 AC_SUBST([SRCDIR])
 AC_SUBST([BUILDDIR])
@@ -105,16 +110,18 @@ AC_CHECK_PROG([FIND_FOUND], [find], [yes])
 AS_IF([test "x$FIND_FOUND" != "xyes"],
     [AC_MSG_ERROR([find not found, please install find before configuring])])
 
-# The macro only sets the version when it runs the check, not when the result
-# comes from a cache file.
-AS_UNSET([_cv_gnu_make_command])
 AX_CHECK_GNU_MAKE([],
     [AC_MSG_ERROR([GNU make not found, please install GNU make 3.81 or later before configuring])])
+
+# GNU make before 3.80 printed "GNU Make version X, by ..." rather than
+# "GNU Make X", so take the version from either form.
+gnu_make_version="$("$_cv_gnu_make_command" --version 2>/dev/null | $SED -n -e 's/^GNU Make version /GNU Make /' -e 's/^GNU Make \([[0-9]][[0-9.]]*\).*/\1/p' | $SED 1q)"
 AC_MSG_CHECKING([whether $_cv_gnu_make_command is 3.81 or later])
-AX_COMPARE_VERSION([$ax_check_gnu_make_version], [ge], [3.81],
-    [AC_MSG_RESULT([yes])],
+AS_VERSION_COMPARE([$gnu_make_version], [3.81],
     [AC_MSG_RESULT([no])
-     AC_MSG_ERROR([$_cv_gnu_make_command is GNU make $ax_check_gnu_make_version, but 3.81 or later is required; set MAKE to a newer one])])
+     AC_MSG_ERROR([$_cv_gnu_make_command is GNU make $gnu_make_version, but 3.81 or later is required; set MAKE to a newer one])],
+    [AC_MSG_RESULT([yes])],
+    [AC_MSG_RESULT([yes])])
 
 # GET_PROG(UPPERCASEVAR, [default command], ['tool' if toolchain], ['no-err' to warn instead of fail])
 # Resolves VAR to an absolute program path, honouring a user-supplied value if
@@ -278,8 +285,13 @@ AS_IF([test "x$BUILD_ANY_UEFI" = "xno"], [UEFI_CD_DEFAULT="no"])
 
 LIMINE_ENABLE([uefi-cd], [UEFI_CD], [enable building limine-uefi-cd.bin],
     ["$UEFI_CD_DEFAULT"])
-AS_IF([test "x$BUILD_UEFI_CD" = "xyes" && test "x$BUILD_ANY_UEFI" = "xno"],
-    [AC_MSG_ERROR([limine-uefi-cd.bin needs at least one UEFI port enabled])])
+AS_IF([test "x$BUILD_UEFI_CD" = "xyes"], [
+    AC_MSG_CHECKING([whether a UEFI port is enabled for limine-uefi-cd.bin])
+    AS_IF([test "x$BUILD_ANY_UEFI" = "xyes"],
+        [AC_MSG_RESULT([yes])],
+        [AC_MSG_RESULT([no])
+         AC_MSG_ERROR([limine-uefi-cd.bin needs at least one UEFI port enabled])])
+])
 AS_IF([test "x$BUILD_UEFI_CD" != "xno"], [
     AC_CHECK_PROG([MTOOLS_FOUND], [mcopy], [yes])
     AS_IF([test "x$MTOOLS_FOUND" != "xyes"], [
@@ -489,7 +501,7 @@ LIMINE_PORT_FLAGS([UEFI_AARCH64], [the aarch64 UEFI port], [aarch64],
 # The ABI is given first, as the instruction set is checked against it.
 LIMINE_PORT_FLAGS([UEFI_RISCV64], [the riscv64 UEFI port], [riscv64],
     [$limine_cflags -fPIE -fshort-wchar -mabi=lp64],
-    [$limine_ldflags -m elf64lriscv --no-relax -pie -z text --hash-style=gnu], [
+    [$limine_ldflags -m elf64lriscv -pie -z text --hash-style=gnu], [
     LIMINE_CHECK_CFLAG([UEFI_RISCV64], [-fno-stack-clash-protection])
     LIMINE_CHECK_CFLAG([UEFI_RISCV64], [-fcf-protection=none])
     # Name Zicsr and Zifencei only if the compiler knows them, as older ones
@@ -503,16 +515,17 @@ LIMINE_PORT_FLAGS([UEFI_RISCV64], [the riscv64 UEFI port], [riscv64],
          UEFI_RISCV64_CFLAGS="$UEFI_RISCV64_CFLAGS -march=rv64imac"])
     # Clang called this code model "small" before the ISA's own name.
     LIMINE_CHECK_CFLAG([UEFI_RISCV64], [-mcmodel=medlow], [-mcode-model],
-        [LIMINE_CHECK_CFLAG([UEFI_RISCV64], [-mcmodel=small], [-mcode-model],
-            [AC_MSG_ERROR([$CC_FOR_TARGET has no name for the low code model])])])
-    LIMINE_CHECK_CFLAG([UEFI_RISCV64], [-mno-relax])
+        [LIMINE_CHECK_CFLAG([UEFI_RISCV64], [-mcmodel=small], [-mcode-model])])
+    # Keep linker relaxation away from gp, which nothing sets up. Linkers
+    # without the flag only use gp if the script defines __global_pointer$.
+    LIMINE_CHECK_LDFLAG([UEFI_RISCV64], [--no-relax-gp])
 ])
 
 # -msoft-float, unlike -mfpu=none, also overrides a -mdouble-float or
 # -msingle-float in CFLAGS_FOR_TARGET, which take effect wherever they appear.
 LIMINE_PORT_FLAGS([UEFI_LOONGARCH64], [the loongarch64 UEFI port], [loongarch64],
     [$limine_cflags -fPIE -fshort-wchar -mabi=lp64s -march=loongarch64 -msoft-float],
-    [$limine_ldflags -m elf64loongarch --no-relax -pie -z text --hash-style=gnu], [
+    [$limine_ldflags -m elf64loongarch -pie -z text --hash-style=gnu], [
     LIMINE_CHECK_CFLAG([UEFI_LOONGARCH64], [-fno-stack-clash-protection])
     # Clang 16 takes the soft float flags but still records the double float
     # ABI, which no linker mixes with soft float objects, so read the ABI out
@@ -529,12 +542,11 @@ LIMINE_PORT_FLAGS([UEFI_LOONGARCH64], [the loongarch64 UEFI port], [loongarch64]
     # Clang had its flag before the architecture existed.
     AS_IF([test "x$CC_FOR_TARGET_IS_CLANG" = "xyes"],
         [UEFI_LOONGARCH64_CFLAGS="$UEFI_LOONGARCH64_CFLAGS -fdirect-access-external-data"],
-        [LIMINE_CHECK_CFLAG([UEFI_LOONGARCH64], [-mdirect-extern-access])])
+        [LIMINE_CHECK_CFLAG([UEFI_LOONGARCH64], [-mdirect-extern-access], [],
+            [AC_MSG_ERROR([$CC_FOR_TARGET cannot keep external data out of the GOT])])])
     # Clang called this code model "small" before the ISA's own name.
     LIMINE_CHECK_CFLAG([UEFI_LOONGARCH64], [-mcmodel=normal], [-mcode-model],
-        [LIMINE_CHECK_CFLAG([UEFI_LOONGARCH64], [-mcmodel=small], [-mcode-model],
-            [AC_MSG_ERROR([$CC_FOR_TARGET has no name for the normal code model])])])
-    LIMINE_CHECK_CFLAG([UEFI_LOONGARCH64], [-mno-relax])
+        [LIMINE_CHECK_CFLAG([UEFI_LOONGARCH64], [-mcmodel=small], [-mcode-model])])
 ])
 
 LIMINE_COPYRIGHT=$($GREP Copyright "$SRCDIR/COPYING")
