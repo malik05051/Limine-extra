@@ -732,7 +732,7 @@ bool fat32_readdir(struct volume *part, const char *path,
     size_t block_size = context.sectors_per_cluster * context.bytes_per_sector;
     size_t entry_count = (dir_chain_len * block_size) / sizeof(struct fat32_directory_entry);
 
-    char current_lfn[FAT32_LFN_MAX_FILENAME_LENGTH] = {0};
+    uint16_t current_lfn[FAT32_LFN_MAX_ENTRIES * 13];
     unsigned int lfn_expected = 0;
     uint8_t lfn_checksum = 0;
     bool lfn_complete = false;
@@ -756,7 +756,7 @@ bool fat32_readdir(struct volume *part, const char *path,
             const unsigned int seq_num = lfn->sequence_number & 0b00011111;
 
             if (lfn->sequence_number & 0b01000000) {
-                memset(current_lfn, ' ', sizeof(current_lfn));
+                memset(current_lfn, 0, sizeof(current_lfn));
                 lfn_expected = seq_num;
                 lfn_checksum = lfn->dos_checksum;
                 lfn_complete = false;
@@ -777,18 +777,11 @@ bool fat32_readdir(struct volume *part, const char *path,
                 continue;
             }
 
-            fat32_lfncpy(current_lfn, sizeof(current_lfn), lfn_index + 0, lfn->name1, 5);
-            fat32_lfncpy(current_lfn, sizeof(current_lfn), lfn_index + 5, lfn->name2, 6);
-            fat32_lfncpy(current_lfn, sizeof(current_lfn), lfn_index + 11, lfn->name3, 2);
+            memcpy(&current_lfn[lfn_index], lfn->name1, sizeof(lfn->name1));
+            memcpy(&current_lfn[lfn_index + 5], lfn->name2, sizeof(lfn->name2));
+            memcpy(&current_lfn[lfn_index + 11], lfn->name3, sizeof(lfn->name3));
 
             if (seq_num == 1) {
-                // remove trailing spaces
-                for (int j = SIZEOF_ARRAY(current_lfn) - 2; j >= -1; j--) {
-                    if (j == -1 || current_lfn[j] != ' ') {
-                        current_lfn[j + 1] = 0;
-                        break;
-                    }
-                }
                 lfn_complete = true;
             }
 
@@ -804,10 +797,9 @@ bool fat32_readdir(struct volume *part, const char *path,
 
         // A long name only belongs to the short entry it was checksummed
         // against; anything else is a stale or truncated set.
-        if (lfn_complete
-         && fat32_lfn_checksum(entry->file_name_and_ext) == lfn_checksum) {
-            strcpy(name, current_lfn);
-        } else {
+        if (!lfn_complete
+         || fat32_lfn_checksum(entry->file_name_and_ext) != lfn_checksum
+         || !utf16_to_utf8(name, sizeof(name), current_lfn, SIZEOF_ARRAY(current_lfn), NULL)) {
             fat32_name_from_8_3(name, entry);
         }
 
