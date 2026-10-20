@@ -139,11 +139,11 @@ static void tpm_extend_failed(void) {
 // An EFI_TCG2_EVENT whose payload is a TCG_PCClientTaggedEvent, which is how
 // the newer event types carry a machine-readable tag alongside the text.
 struct tcg2_tagged_event {
-    UINT32 Size;
+    EFI_UINT32 Size;
     EFI_TCG2_EVENT_HEADER Header;
-    UINT32 EventId;
-    UINT32 EventSize;
-    UINT8 Event[];
+    EFI_UINT32 EventId;
+    EFI_UINT32 EventSize;
+    EFI_UINT8 Event[];
 } __attribute__((packed));
 
 void tpm_measure_tagged(uint32_t pcr, uint32_t event_id,
@@ -165,13 +165,13 @@ void tpm_measure_tagged(uint32_t pcr, uint32_t event_id,
     size_t event_size = offsetof(struct tcg2_tagged_event, Event) + desc_size;
 
     struct tcg2_tagged_event *event = ext_mem_alloc(event_size);
-    event->Size = (UINT32)event_size;
+    event->Size = (EFI_UINT32)event_size;
     event->Header.HeaderSize = sizeof(EFI_TCG2_EVENT_HEADER);
     event->Header.HeaderVersion = 1;
     event->Header.PCRIndex = pcr;
     event->Header.EventType = TPM_EV_EVENT_TAG;
     event->EventId = event_id;
-    event->EventSize = (UINT32)desc_size;
+    event->EventSize = (EFI_UINT32)desc_size;
 
     wchar_t *wide = (wchar_t *)event->Event;
     for (size_t i = 0; i < desc_chars; i++) {
@@ -181,7 +181,7 @@ void tpm_measure_tagged(uint32_t pcr, uint32_t event_id,
 
     EFI_STATUS status = tcg2->HashLogExtendEvent(
         tcg2, 0,
-        (EFI_PHYSICAL_ADDRESS)(uintptr_t)data, (UINT64)data_size,
+        (EFI_PHYSICAL_ADDRESS)(uintptr_t)data, (EFI_UINT64)data_size,
         (EFI_TCG2_EVENT *)event);
     if (status != EFI_SUCCESS) {
         quiet = false;
