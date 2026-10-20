@@ -17,6 +17,7 @@
 #include <lib/fb.h>
 #include <lib/acpi.h>
 #include <lib/fdt.h>
+#include <drivers/edid.h>
 #include <libfdt.h>
 
 #if defined(__riscv)
@@ -87,8 +88,8 @@ _Static_assert(sizeof(struct linux_header) == 0x40, "linux_header layout");
 // UINTN is 8 bytes (UEFI 2.11, section 2.3.1).
 
 struct linux_efi_initrd {
-    UINTN base;
-    UINTN size;
+    EFI_UINTN base;
+    EFI_UINTN size;
 };
 
 _Static_assert(offsetof(struct linux_efi_initrd, base) == 0, "linux_efi_initrd layout");
@@ -96,11 +97,11 @@ _Static_assert(offsetof(struct linux_efi_initrd, size) == 8, "linux_efi_initrd l
 _Static_assert(sizeof(struct linux_efi_initrd) == 16, "linux_efi_initrd layout");
 
 struct linux_efi_boot_memmap {
-    UINTN map_size;
-    UINTN desc_size;
-    UINT32 desc_ver;
-    UINTN map_key;
-    UINTN buff_size;
+    EFI_UINTN map_size;
+    EFI_UINTN desc_size;
+    EFI_UINT32 desc_ver;
+    EFI_UINTN map_key;
+    EFI_UINTN buff_size;
     EFI_MEMORY_DESCRIPTOR descs[];
 };
 
@@ -113,15 +114,15 @@ _Static_assert(offsetof(struct linux_efi_boot_memmap, descs) == 40, "linux_efi_b
 _Static_assert(sizeof(struct linux_efi_boot_memmap) == 40, "linux_efi_boot_memmap layout");
 
 struct linux_efi_memreserve_entry {
-    UINT64 base;
-    UINT64 size;
+    EFI_UINT64 base;
+    EFI_UINT64 size;
 };
 
 // One link of a chain of reservation tables, which the kernel may extend.
 struct linux_efi_memreserve {
-    INT32 capacity;
-    INT32 count;
-    UINT64 next;
+    EFI_INT32 capacity;
+    EFI_INT32 count;
+    EFI_UINT64 next;
     struct linux_efi_memreserve_entry entries[];
 };
 
@@ -132,11 +133,22 @@ _Static_assert(offsetof(struct linux_efi_memreserve, next) == 8, "linux_efi_memr
 _Static_assert(offsetof(struct linux_efi_memreserve, entries) == 16, "linux_efi_memreserve layout");
 _Static_assert(sizeof(struct linux_efi_memreserve) == 16, "linux_efi_memreserve layout");
 
+// The screen info table holds screen_info, then the display's EDID base
+// block, all of which kernels may read and then clear.
+struct linux_efi_screen_info {
+    struct screen_info screen_info;
+    struct edid_info_struct edid_info;
+};
+
+_Static_assert(offsetof(struct linux_efi_screen_info, edid_info) == 0x40, "linux_efi_screen_info layout");
+_Static_assert(sizeof(struct linux_efi_screen_info) == 0xc0, "linux_efi_screen_info layout");
+
 struct boot_param {
     void *kernel_base;
     size_t kernel_size;
     void *module_base;
     size_t module_size;
+    uint64_t module_limit;
     char *cmdline;
     void *dtb;
     struct linux_efi_boot_memmap *memmap;
@@ -148,6 +160,8 @@ struct boot_param {
 #define LINUX_HEADER_MINOR_VER(ver)     (((ver) >> 0)  & 0xffff)
 #elif defined(__aarch64__)
 #define LINUX_HEADER_MAGIC2             0x644d5241
+// booting.rst, "Kernel physical placement".
+#define LINUX_HEADER_FLAG_PHYS_PLACEMENT (1 << 3)
 #elif defined(__loongarch__)
 #define LINUX_HEADER_MAGIC2             0x818223cd
 #endif
@@ -209,9 +223,12 @@ static void load_module(struct boot_param *p, char *config) {
     }
 
     p->module_size = total_size;
-    p->module_base = ext_mem_alloc_type_aligned(
-                    ALIGN_UP(p->module_size, 4096, panic(true, "linux: Alignment overflow")),
-                    MEMMAP_KERNEL_AND_MODULES, 4096);
+    uint64_t module_alloc_size = ALIGN_UP(p->module_size, 4096, panic(true, "linux: Alignment overflow"));
+    if (p->module_limit != 0) {
+        p->module_base = ext_mem_alloc_type_aligned_below(module_alloc_size, MEMMAP_KERNEL_AND_MODULES, 4096, p->module_limit, false);
+    } else {
+        p->module_base = ext_mem_alloc_type_aligned(module_alloc_size, MEMMAP_KERNEL_AND_MODULES, 4096);
+    }
 
     size_t offset = 0;
     for (size_t i = 0; i < module_count; i++) {
@@ -291,13 +308,17 @@ static void prepare_device_tree_blob(struct boot_param *p) {
 }
 
 static void add_framebuffer(struct fb_info *fb) {
-    struct screen_info *screen_info;
+    struct linux_efi_screen_info *table;
 
-    EFI_STATUS alloc_ret = gBS->AllocatePool(EfiLoaderData, sizeof(*screen_info), (void **)&screen_info);
+    // Memory of this type is preserved until ACPI is enabled (UEFI 2.11
+    // section 7.2), so the kernel cannot hand it out before copying the table.
+    EFI_STATUS alloc_ret = gBS->AllocatePool(EfiACPIReclaimMemory, sizeof(*table), (void **)&table);
     if (alloc_ret != EFI_SUCCESS) {
         panic(true, "linux: failed to allocate screen info table");
     }
-    memset(screen_info, 0, sizeof(*screen_info));
+    memset(table, 0, sizeof(*table));
+
+    struct screen_info *screen_info = &table->screen_info;
 
     screen_info->capabilities   = VIDEO_CAPABILITY_64BIT_BASE;
     screen_info->flags          = VIDEO_FLAGS_NOCURSOR;
@@ -317,8 +338,12 @@ static void add_framebuffer(struct fb_info *fb) {
 
     screen_info->orig_video_isVGA = VIDEO_TYPE_EFI;
 
+    if (fb->edid != NULL) {
+        memcpy(&table->edid_info, fb->edid, sizeof(table->edid_info));
+    }
+
     EFI_GUID screen_info_table_guid = {0xe03fc20a, 0x85dc, 0x406e, {0xb9, 0x0e, 0x4a, 0xb5, 0x02, 0x37, 0x1d, 0x95}};
-    EFI_STATUS ret = gBS->InstallConfigurationTable(&screen_info_table_guid, screen_info);
+    EFI_STATUS ret = gBS->InstallConfigurationTable(&screen_info_table_guid, table);
 
     if (ret != EFI_SUCCESS) {
         panic(true, "linux: failed to install screen info configuration table: '%X'", (uint64_t)ret);
@@ -378,7 +403,7 @@ static void prepare_efi_tables(struct boot_param *p, char *config) {
             panic(true, "linux: failed to allocate Linux initrd table");
         }
 
-        initrd_table->base = (UINTN)p->module_base;
+        initrd_table->base = (EFI_UINTN)p->module_base;
         initrd_table->size = p->module_size;
 
         EFI_GUID initrd_table_guid = { 0x5568e427, 0x68fc, 0x4f3d, { 0xac, 0x74, 0xca, 0x55, 0x52, 0x31, 0xcc, 0x68}};
@@ -389,9 +414,24 @@ static void prepare_efi_tables(struct boot_param *p, char *config) {
     }
 
     {
-        size_t buff_size = sizeof(struct linux_efi_boot_memmap) + efi_mmap_size + 4096;
+        // What gets copied in here is the map efi_exit_boot_services()
+        // rebuilds out of the firmware's, which grows little from here on.
+        EFI_UINTN mmap_size = 0, mmap_key, desc_size;
+        EFI_UINT32 desc_ver;
+        ret = gBS->GetMemoryMap(&mmap_size, NULL, &mmap_key, &desc_size, &desc_ver);
+        if (ret != EFI_BUFFER_TOO_SMALL) {
+            panic(true, "linux: failed to get UEFI memory map size");
+        }
 
-        ret = gBS->AllocatePool(EfiLoaderData, buff_size, (void **)&p->memmap);
+        EFI_UINTN descs_size = efi_rebuilt_mmap_max_size(mmap_size);
+        if (descs_size == 0 || descs_size > SIZE_MAX - sizeof(struct linux_efi_boot_memmap)) {
+            panic(true, "linux: UEFI memory map too large");
+        }
+        size_t buff_size = sizeof(struct linux_efi_boot_memmap) + descs_size;
+
+        // Memory of this type is preserved until ACPI is enabled (UEFI 2.11
+        // section 7.2), so the kernel cannot hand it out before reading the map.
+        ret = gBS->AllocatePool(EfiACPIReclaimMemory, buff_size, (void **)&p->memmap);
         if (ret != EFI_SUCCESS) {
             panic(true, "linux: failed to allocate UEFI memory map");
         }
@@ -405,11 +445,55 @@ static void prepare_efi_tables(struct boot_param *p, char *config) {
         }
     }
 
+#if defined (__loongarch__)
+    // The kernel finds a device tree only in its own image or in this table.
+    // With either key set, get_device_tree_blob() loaded the tree from it or
+    // panicked.
+    if (config_get_value(config, 0, "dtb_path") != NULL
+     || config_get_value(NULL, 0, "global_dtb") != NULL) {
+        size_t dtb_size = fdt_totalsize(p->dtb);
+        void *dtb_table;
+
+        // Preserved until ACPI is enabled (UEFI 2.11 section 7.2), unlike the
+        // memory the tree was built in.
+        ret = gBS->AllocatePool(EfiACPIReclaimMemory, dtb_size, &dtb_table);
+        if (ret != EFI_SUCCESS) {
+            panic(true, "linux: failed to allocate device tree table");
+        }
+
+        memcpy(dtb_table, p->dtb, dtb_size);
+
+        EFI_GUID dtb_table_guid = EFI_DTB_TABLE_GUID;
+        ret = gBS->InstallConfigurationTable(&dtb_table_guid, dtb_table);
+        if (ret != EFI_SUCCESS) {
+            panic(true, "linux: failed to install device tree table: '%X'", (uint64_t)ret);
+        }
+    }
+#endif
+
     linux_install_efi_tpm_event_log();
     efi_exit_boot_services();
 }
 
+#if !defined (__loongarch__)
+// Kernels do without runtime services when the runtime descriptors they get
+// carry all-ones virtual addresses.
+static void mark_runtime_unmapped(EFI_MEMORY_DESCRIPTOR *map) {
+    size_t entry_count = efi_mmap_size / efi_desc_size;
+    for (size_t i = 0; i < entry_count; i++) {
+        EFI_MEMORY_DESCRIPTOR *entry = (void *)map + i * efi_desc_size;
+
+        if (entry->Attribute & EFI_MEMORY_RUNTIME) {
+            entry->VirtualStart = UINT64_MAX;
+        }
+    }
+}
+#endif
+
 static void prepare_mmap(struct boot_param *p) {
+    // The LoongArch kernel reads the map from its configuration table, and any
+    // tree it gets was copied out before ExitBootServices().
+#if !defined (__loongarch__)
     {
         void *dtb = p->dtb;
         int ret = fdt_set_chosen_uint64(dtb, "linux,uefi-mmap-start", (uint64_t)efi_mmap);
@@ -431,6 +515,11 @@ static void prepare_mmap(struct boot_param *p) {
         if (ret < 0) {
             panic(true, "linux: failed to set UEFI memory map descriptor version: '%s'", fdt_strerror(ret));
         }
+    }
+#endif
+
+    if (efi_mmap_size > p->memmap->buff_size - sizeof(struct linux_efi_boot_memmap)) {
+        panic(false, "linux: UEFI memory map outgrew its configuration table");
     }
 
     p->memmap->map_size  = efi_mmap_size;
@@ -457,7 +546,15 @@ static void prepare_mmap(struct boot_param *p) {
 
     EFI_STATUS status = gRT->SetVirtualAddressMap(efi_mmap_size, efi_desc_size, efi_desc_ver, efi_mmap);
     if (status != EFI_SUCCESS) {
+#if defined (__loongarch__)
+        // The kernel uses the runtime services table regardless of the
+        // descriptors' virtual addresses, so it cannot do without the mapping.
         panic(false, "linux: failed to set UEFI virtual address map: '%X'", (uint64_t)status);
+#else
+        printv("linux: failed to set UEFI virtual address map: '%X', booting without runtime services\n", (uint64_t)status);
+        mark_runtime_unmapped(efi_mmap);
+        mark_runtime_unmapped(p->memmap->descs);
+#endif
     }
 }
 
@@ -622,9 +719,35 @@ noreturn void linux_load(char *config, char *cmdline) {
     }
 #endif
 
-    p.kernel_base = ext_mem_alloc_type_aligned(
-                ALIGN_UP(CHECKED_ADD(text_offset, kernel_alloc_size, panic(true, "linux: Kernel size overflow")), 4096, panic(true, "linux: Alignment overflow")),
-                MEMMAP_KERNEL_AND_MODULES, 2 * 1024 * 1024);
+    size_t kernel_region_size = ALIGN_UP(CHECKED_ADD(text_offset, kernel_alloc_size, panic(true, "linux: Kernel size overflow")), 4096, panic(true, "linux: Alignment overflow"));
+
+#if defined (__aarch64__)
+    // Without the flag, memory below the image's base is out of the kernel's
+    // linear map. With it, the image need only end within 48-bit physical
+    // addresses, and stays near the modules, which are allocated top down.
+    if (tmp_hdr.flags & LINUX_HEADER_FLAG_PHYS_PLACEMENT) {
+        p.kernel_base = ext_mem_alloc_type_aligned_below(kernel_region_size,
+            MEMMAP_KERNEL_AND_MODULES, 2 * 1024 * 1024, (uint64_t)1 << 48, false);
+    } else {
+        p.kernel_base = ext_mem_alloc_type_aligned_below(kernel_region_size,
+            MEMMAP_KERNEL_AND_MODULES, 2 * 1024 * 1024, UINT64_MAX, true);
+        // The modules, allocated top down, would otherwise land beyond the
+        // window that the initrd must share with the image.
+        p.module_limit = ALIGN_DOWN((uint64_t)(uintptr_t)p.kernel_base, (uint64_t)1 << 30) + ((uint64_t)32 << 30);
+    }
+#elif defined (__loongarch__)
+    // A kernel that cannot relocate itself only runs at the physical address
+    // it was linked for, which load_offset gives.
+    if (memmap_alloc_range(tmp_hdr.load_offset, kernel_region_size,
+            MEMMAP_KERNEL_AND_MODULES, MEMMAP_USABLE, false, false, false)) {
+        p.kernel_base = (void *)(uintptr_t)tmp_hdr.load_offset;
+        memset(p.kernel_base, 0, kernel_region_size);
+    } else {
+        p.kernel_base = ext_mem_alloc_type_aligned(kernel_region_size, MEMMAP_KERNEL_AND_MODULES, 2 * 1024 * 1024);
+    }
+#else
+    p.kernel_base = ext_mem_alloc_type_aligned(kernel_region_size, MEMMAP_KERNEL_AND_MODULES, 2 * 1024 * 1024);
+#endif
     p.kernel_base += text_offset;
     fread(kernel_file, p.kernel_base, 0, p.kernel_size);
     fclose(kernel_file);

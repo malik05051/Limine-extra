@@ -7,6 +7,17 @@
 #include <lib/print.h>
 #include <mm/pmm.h>
 
+static bool smbios_entry_32_valid(struct smbios_entry_point_32 *ep) {
+    // SMBIOS 2.1 misstated the length as 1Eh, which leaves out the BCD
+    // revision, so its implementations may use either 1Eh or 1Fh.
+    if (ep->length < offsetof(struct smbios_entry_point_32, bcd_revision)
+     || acpi_checksum(ep, ep->length) != 0) {
+        return false;
+    }
+
+    return true;
+}
+
 #if defined (BIOS)
 
 /// Returns the RSDP v1 pointer if available or else NULL.
@@ -31,9 +42,7 @@ void acpi_get_smbios(void **smbios32, void **smbios64) {
     for (size_t i = 0xf0000; i < 0x100000; i += 16) {
         struct smbios_entry_point_32 *ptr = (struct smbios_entry_point_32 *)i;
 
-        if (!memcmp(ptr->anchor_str, "_SM_", 4) &&
-            ptr->length >= sizeof(struct smbios_entry_point_32) &&
-            !acpi_checksum((void *)ptr, ptr->length)) {
+        if (!memcmp(ptr->anchor_str, "_SM_", 4) && smbios_entry_32_valid(ptr)) {
             printv("acpi: Found SMBIOS 32-bit entry point at %p\n", i);
             *smbios32 = (void *)ptr;
             break;
@@ -65,7 +74,7 @@ void *acpi_get_rsdp_v1(void) {
     // again since UEFI can contain both XSDP and RSDP (see ACPI 6.2 section
     // 5.2.5.2 'Finding the RSDP on UEFI Enabled Systems') and in the acpi_get_rsdp
     // function we look for the RSDP with the latest revision.
-    EFI_GUID acpi_1_guid = ACPI_TABLE_GUID;
+    EFI_GUID acpi_1_guid = EFI_ACPI_10_TABLE_GUID;
 
     for (size_t i = 0; i < gST->NumberOfTableEntries; i++) {
         EFI_CONFIGURATION_TABLE *cur_table = &gST->ConfigurationTable[i];
@@ -88,16 +97,16 @@ void acpi_get_smbios(void **smbios32, void **smbios64) {
 
     for (size_t i = 0; i < gST->NumberOfTableEntries; i++) {
         EFI_CONFIGURATION_TABLE *cur_table = &gST->ConfigurationTable[i];
-        EFI_GUID smbios_guid = SMBIOS_TABLE_GUID;
+        EFI_GUID smbios_guid = EFI_SMBIOS_TABLE_GUID;
 
         if (memcmp(&cur_table->VendorGuid, &smbios_guid, sizeof(EFI_GUID)) != 0)
             continue;
 
         struct smbios_entry_point_32 *ptr = (struct smbios_entry_point_32 *)cur_table->VendorTable;
 
-        if (ptr->length < sizeof(struct smbios_entry_point_32)
-         || acpi_checksum((void *)ptr, ptr->length) != 0)
+        if (!smbios_entry_32_valid(ptr)) {
             continue;
+        }
 
         printv("acpi: Found SMBIOS 32-bit entry point at %p\n", ptr);
 
@@ -108,7 +117,7 @@ void acpi_get_smbios(void **smbios32, void **smbios64) {
 
     for (size_t i = 0; i < gST->NumberOfTableEntries; i++) {
         EFI_CONFIGURATION_TABLE *cur_table = &gST->ConfigurationTable[i];
-        EFI_GUID smbios3_guid = SMBIOS3_TABLE_GUID;
+        EFI_GUID smbios3_guid = EFI_SMBIOS3_TABLE_GUID;
 
         if (memcmp(&cur_table->VendorGuid, &smbios3_guid, sizeof(EFI_GUID)) != 0)
             continue;
@@ -172,7 +181,10 @@ static void map_single_table(uint64_t addr, uint32_t len) {
     }
 #endif
 
-    uint32_t length = len != (uint32_t)-1 ? len : *(uint32_t *)(uintptr_t)(addr + 4);
+    uint32_t length = len;
+    if (length == (uint32_t)-1) {
+        memcpy(&length, (void *)(uintptr_t)(addr + 4), sizeof(length));
+    }
 
     uint64_t aligned_base = ALIGN_DOWN(addr, 4096);
     uint64_t aligned_top  = ALIGN_UP(addr + length, 4096, panic(false, "acpi: Alignment overflow"));
@@ -219,7 +231,8 @@ void acpi_map_tables(void) {
     map_single_table((uintptr_t)xsdt, (uint32_t)-1);
 
     for (size_t i = 0; i < xsdt_entry_count; i++) {
-        uint64_t entry = ((uint64_t *)xsdt->ptrs_start)[i];
+        uint64_t entry;
+        memcpy(&entry, xsdt->ptrs_start + i * sizeof(entry), sizeof(entry));
         if (entry == 0)
             continue;
         struct sdt *sdt = (void *)(uintptr_t)entry;
@@ -241,7 +254,8 @@ no_xsdt:;
     map_single_table((uintptr_t)rsdt, (uint32_t)-1);
 
     for (size_t i = 0; i < rsdt_entry_count; i++) {
-        uint32_t entry = ((uint32_t *)rsdt->ptrs_start)[i];
+        uint32_t entry;
+        memcpy(&entry, rsdt->ptrs_start + i * sizeof(entry), sizeof(entry));
         if (entry == 0)
             continue;
         struct sdt *sdt = (void *)(uintptr_t)entry;

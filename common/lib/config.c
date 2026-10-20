@@ -11,6 +11,7 @@
 #include <pxe/tftp.h>
 #include <crypt/blake2b.h>
 #include <lib/tpm.h>
+#include <lib/utf.h>
 #include <sys/cpu.h>
 
 #define CONFIG_B2SUM_SIGNATURE "++CONFIG_B2SUM_SIGNATURE++"
@@ -49,6 +50,7 @@ static bool init_efi_app_path(size_t *len_out) {
     EFI_STATUS status;
     EFI_LOADED_IMAGE_PROTOCOL *loaded_image;
     EFI_DEVICE_PATH_PROTOCOL *path;
+    EFI_CHAR16 path_units[EFI_APP_PATH_LEN];
     size_t len = 0, dir_len = 0;
 
     EFI_GUID loaded_image_protocol_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
@@ -59,14 +61,18 @@ static bool init_efi_app_path(size_t *len_out) {
         return false;
     }
 
+    // NULL for an image loaded from a buffer without a device path.
     path = loaded_image->FilePath;
+    if (path == NULL) {
+        return false;
+    }
 
-    while (!(path->Type == END_DEVICE_PATH_TYPE && path->SubType == END_ENTIRE_DEVICE_PATH_SUBTYPE)) {
-        if (path->Type == MEDIA_DEVICE_PATH && path->SubType == MEDIA_FILEPATH_DP) {
+    while (!(path->Type == EFI_END_DEVICE_PATH_TYPE && path->SubType == EFI_END_ENTIRE_DEVICE_PATH_SUBTYPE)) {
+        if (path->Type == EFI_MEDIA_DEVICE_PATH && path->SubType == EFI_MEDIA_FILEPATH_DP) {
             goto found;
         }
 
-        uint16_t node_length = *((uint16_t *)&path->Length[0]);
+        uint16_t node_length = EfiDevicePathNodeLength(path);
         if (node_length < 4) {
             return false;
         }
@@ -76,24 +82,46 @@ static bool init_efi_app_path(size_t *len_out) {
     return false;
 
 found:
-    // A file path may span several consecutive MEDIA_FILEPATH_DP nodes; walk
-    // them all, bounding each scan by the node length, and keep the directory.
-    while (path->Type == MEDIA_DEVICE_PATH && path->SubType == MEDIA_FILEPATH_DP) {
-        uint16_t node_length = *((uint16_t *)&path->Length[0]);
+    // A file path may span several consecutive EFI_MEDIA_FILEPATH_DP nodes;
+    // walk them all, bounding each scan by the node length, and keep the
+    // directory.
+    while (path->Type == EFI_MEDIA_DEVICE_PATH && path->SubType == EFI_MEDIA_FILEPATH_DP) {
+        uint16_t node_length = EfiDevicePathNodeLength(path);
         if (node_length < 4) {
             return false;
         }
 
-        CHAR16 *node_path = (CHAR16 *)((void *)path + 4);
+        // Nodes may start at any byte boundary (UEFI 2.11 section 10.3.1).
+        uint8_t *node_path = (uint8_t *)path + 4;
         size_t node_chars = (node_length - 4) / 2;
 
-        for (size_t i = 0; i < node_chars && node_path[i] != 0 && len < EFI_APP_PATH_LEN - 1; i++) {
-            if (node_path[i] == L'\\') {
-                efi_app_path[len++] = '/';
-                dir_len = len;
-            } else {
-                efi_app_path[len++] = (char)(node_path[i] & 0xff);
+        // A node boundary separates path components (UEFI 2.11 section
+        // 10.3.5.4).
+        bool separator = len != 0;
+
+        for (size_t i = 0; i < node_chars; i++) {
+            EFI_CHAR16 c = node_path[i * 2] | (node_path[i * 2 + 1] << 8);
+            if (c == 0) {
+                break;
             }
+            if (c == L'\\' || c == L'/') {
+                separator = true;
+                continue;
+            }
+            if (len + separator >= EFI_APP_PATH_LEN - 1) {
+                // A directory cut short would be another directory, so only
+                // the file name may be.
+                if (separator) {
+                    return false;
+                }
+                continue;
+            }
+            if (separator) {
+                path_units[len++] = L'/';
+                dir_len = len;
+                separator = false;
+            }
+            path_units[len++] = c;
         }
 
         path = (void *)path + node_length;
@@ -103,8 +131,8 @@ found:
         efi_app_path[0] = '/';
         efi_app_path[1] = 0;
         dir_len = 1;
-    } else {
-        efi_app_path[dir_len] = 0;
+    } else if (!utf16_to_utf8(efi_app_path, EFI_APP_PATH_LEN, path_units, dir_len, &dir_len)) {
+        return false;
     }
 
     if (len_out != NULL) {
@@ -227,8 +255,12 @@ bool init_config_smbios(void) {
             return false;
         }
 
-        if (hdr->type == 127)
+        // SMBIOS 3.9 section 7.49 has End-of-Table used like an Inactive
+        // structure, the whole table staying indexable, so stop at it only
+        // when there is no structure count to go by.
+        if (hdr->type == 127 && struct_count == 0) {
             return false;
+        }
 
         size_t struct_size = smbios_struct_size(hdr, remaining);
         if (struct_size == 0) {
@@ -373,6 +405,86 @@ struct macro {
 
 static struct macro *macros = NULL;
 
+// Returns the size of the config with its macro references expanded, and
+// stores the expansion in out unless out is NULL.
+static size_t expand_macros(char *out, size_t config_size) {
+    size_t i, in;
+    for (i = 0, in = 0; i < config_size;) {
+        if ((config_size - i >= 3 && memcmp(config_addr + i, "\n${", 3) == 0)
+         || (config_size - i >= 2 && i == 0 && memcmp(config_addr, "${", 2) == 0)) {
+            size_t orig_i = i;
+            i += i ? 3 : 2;
+            while (i < config_size && config_addr[i] != '}') {
+                i++;
+            }
+            if (i >= config_size) {
+                bad_config = true;
+                panic(true, "config: Malformed macro usage");
+            }
+            i++;
+            if (i >= config_size || config_addr[i++] != '=') {
+                i = orig_i;
+                goto next;
+            }
+            while (config_addr[i] != '\n' && config_addr[i] != 0) {
+                i++;
+                if (i >= config_size) {
+                    bad_config = true;
+                    panic(true, "config: Malformed macro usage");
+                }
+            }
+            continue;
+        }
+
+next:
+        if (config_size - i >= 2 && memcmp(config_addr + i, "${", 2) == 0) {
+            char *macro_name = ext_mem_alloc(1024);
+            i += 2;
+            size_t j;
+            for (j = 0; j < 1023 && config_addr[i] != '}' && config_addr[i] != '\n' && config_addr[i] != 0; j++, i++) {
+                macro_name[j] = config_addr[i];
+            }
+            if (config_addr[i] != '}') {
+                bad_config = true;
+                panic(true, "config: Malformed macro usage");
+            }
+            i++;
+            macro_name[j] = 0;
+            char *macro_value = "";
+            struct macro *macro = macros;
+            for (;;) {
+                if (macro == NULL) {
+                    break;
+                }
+                if (strcmp(macro->name, macro_name) == 0) {
+                    macro_value = macro->value;
+                    break;
+                }
+                macro = macro->next;
+            }
+            pmm_free(macro_name, 1024);
+            size_t value_len = strlen(macro_value);
+            if (out != NULL) {
+                memcpy(out + in, macro_value, value_len);
+            }
+            in = CHECKED_ADD(in, value_len, goto too_large);
+            continue;
+        }
+
+        if (out != NULL) {
+            out[in] = config_addr[i];
+        }
+        in = CHECKED_ADD(in, 1, goto too_large);
+        i++;
+    }
+
+    return in;
+
+too_large:
+    bad_config = true;
+    panic(true, "config: Config file too large for macro expansion");
+}
+
 int init_config(size_t config_size) {
     config_b2sum += sizeof(CONFIG_B2SUM_SIGNATURE) - 1;
 
@@ -501,90 +613,14 @@ skip_loop:
 
     // Expand macros
     if (macros != NULL) {
-        // Check for overflow before multiplication
-        if (config_size > SIZE_MAX / 4) {
-            bad_config = true;
-            panic(true, "config: Config file too large for macro expansion");
-        }
-        size_t new_config_size = config_size * 4;
+        size_t new_config_size = expand_macros(NULL, config_size);
         char *new_config = ext_mem_alloc(new_config_size);
-
-        size_t i, in;
-        for (i = 0, in = 0; i < config_size;) {
-            if ((config_size - i >= 3 && memcmp(config_addr + i, "\n${", 3) == 0)
-             || (config_size - i >= 2 && i == 0 && memcmp(config_addr, "${", 2) == 0)) {
-                size_t orig_i = i;
-                i += i ? 3 : 2;
-                while (i < config_size && config_addr[i] != '}') {
-                    i++;
-                }
-                if (i >= config_size) {
-                    bad_config = true;
-                    panic(true, "config: Malformed macro usage");
-                }
-                i++; // skip '}'
-                if (i >= config_size || config_addr[i++] != '=') {
-                    i = orig_i;
-                    goto next;
-                }
-                while (config_addr[i] != '\n' && config_addr[i] != 0) {
-                    i++;
-                    if (i >= config_size) {
-                        bad_config = true;
-                        panic(true, "config: Malformed macro usage");
-                    }
-                }
-                continue;
-            }
-
-next:
-            if (config_size - i >= 2 && memcmp(config_addr + i, "${", 2) == 0) {
-                char *macro_name = ext_mem_alloc(1024);
-                i += 2;
-                size_t j;
-                for (j = 0; j < 1023 && config_addr[i] != '}' && config_addr[i] != '\n' && config_addr[i] != 0; j++, i++) {
-                    macro_name[j] = config_addr[i];
-                }
-                if (config_addr[i] != '}') {
-                    bad_config = true;
-                    panic(true, "config: Malformed macro usage");
-                }
-                i++;
-                macro_name[j] = 0;
-                char *macro_value = "";
-                struct macro *macro = macros;
-                for (;;) {
-                    if (macro == NULL) {
-                        break;
-                    }
-                    if (strcmp(macro->name, macro_name) == 0) {
-                        macro_value = macro->value;
-                        break;
-                    }
-                    macro = macro->next;
-                }
-                pmm_free(macro_name, 1024);
-                for (j = 0; macro_value[j] != 0; j++, in++) {
-                    if (in >= new_config_size) {
-                        goto overflow;
-                    }
-                    new_config[in] = macro_value[j];
-                }
-                continue;
-            }
-
-            if (in >= new_config_size) {
-overflow:
-                bad_config = true;
-                panic(true, "config: Macro-induced buffer overflow");
-            }
-            new_config[in++] = config_addr[i++];
-        }
+        expand_macros(new_config, config_size);
 
         pmm_free(config_addr, config_alloc_size);
 
         config_addr = new_config;
-        config_size = in;
+        config_size = new_config_size;
 
         // Free macros
         struct macro *macro = macros;

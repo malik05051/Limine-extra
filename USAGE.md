@@ -13,6 +13,18 @@ can be installed there and coexist with a BIOS installation of Limine
 A valid config file should also be provided as described in
 [CONFIG.md](CONFIG.md).
 
+If the root directory of the volume Limine was loaded from contains a UEFI
+Shell executable, the menu offers a `U` key ("UEFI Shell") that chainloads
+it. The file name depends on the Limine EFI executable:
+
+* `shellx64.efi` for `BOOTX64.EFI`
+* `shellia32.efi` for `BOOTIA32.EFI`
+* `shellaa64.efi` for `BOOTAA64.EFI`
+* `shellriscv64.efi` for `BOOTRISCV64.EFI`
+* `shellloongarch64.efi` for `BOOTLOONGARCH64.EFI`
+
+This is not available when Limine is booted over PXE.
+
 ## Type #1 boot entries
 
 Limine reads Boot Loader Specification Type #1 entries from
@@ -86,6 +98,7 @@ in the Limine EFI executable, the following security policies are enforced:
 * Wallpaper and font files without an associated hash are silently skipped
   (falling back to defaults) rather than causing a panic.
 * The config editor is unconditionally disabled.
+* The UEFI Shell key (`U`) is unavailable.
 * `hash_mismatch_panic` is forced to `yes` regardless of the config setting.
 
 If no config checksum is enrolled, Limine treats Secure Boot as inactive and
@@ -267,10 +280,15 @@ server or your existing DHCP server and a proxy DHCP server such as dnsmasq.
 `limine.conf` and `limine-bios.sys` are expected to be on the server used for
 boot.
 
+With BIOS PXE, the TFTP server must support the `tsize` option (RFC 2349):
+Limine asks for the size of every file before transferring it, and treats a
+file whose size the server does not report as missing.
+
 ## UEFI/PXE boot
 The `BOOT*.EFI` files are compatible with UEFI PXE.
 The steps needed to boot Limine are the same as with BIOS PXE,
-except that the `limine-bios.sys` file is not needed on the server.
+except that the `limine-bios.sys` file is not needed on the server, and
+neither is `tsize` support, as the firmware finds sizes without it.
 
 ## Configuration
 The `limine.conf` file contains Limine's configuration.

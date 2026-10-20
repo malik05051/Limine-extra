@@ -49,13 +49,13 @@ if ! test -f version; then
     clone_repo_commit \
         https://github.com/osdev0/freestanding-c-hdrs.git \
         freestanding-c-hdrs \
-        38fed4e1e3365733ddbfa03b0a28936243ad31e9
+        5b4a649b38e1d27f2b7470f593d58e907438aca5
 
     clone_repo_commit \
-        https://github.com/osdev0/cc-runtime.git \
-        cc-runtime \
-        9891629daf3703d0ddecd295772df7da82ab25b9
-    cp cc-runtime/src/cc-runtime.c common/cc-runtime.s2.c
+        https://github.com/osdev0/freestanding-lgrt.git \
+        freestanding-lgrt \
+        a6e79759589f9905ec08c5fdc7f10f34f668d145
+    cp freestanding-lgrt/src/freestanding-lgrt.c common/freestanding-lgrt.s2.c
 
     clone_repo_commit \
         https://github.com/iczelia/pdgzip.git \
@@ -72,7 +72,7 @@ if ! test -f version; then
     clone_repo_commit \
         https://github.com/PicoEFI/PicoEFI.git \
         picoefi \
-        470ec8325a1e05697c3af6248e2423a92bb820b0
+        0515ccde7a3ac9c52e32c9c21c924a8d50d3261e
 
     clone_repo_commit \
         https://github.com/Mintsuki/Flanterm.git \
@@ -94,7 +94,7 @@ if ! test -f version; then
 fi
 
 # Create timestamps file
-if test -d .git && git log -1 >/dev/null 2>&1; then
+if test -e .git && git log -1 >/dev/null 2>&1; then
     cat >timestamps <<EOF
 REGEN_DATE="$(LC_ALL=C git -c log.showSignature=false log -1 --pretty=%cd --date='format:%B %Y')"
 SOURCE_DATE_EPOCH="$(git -c log.showSignature=false log -1 --pretty=%ct)"

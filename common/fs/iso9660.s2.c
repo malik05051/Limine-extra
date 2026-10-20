@@ -41,6 +41,7 @@ struct BE32_t { uint32_t little, big; } __attribute__((packed));
 // --- Directory entries ---
 struct iso9660_directory_entry {
     uint8_t length;
+    // In logical blocks, recorded at the start of the extent ahead of the data.
     uint8_t extended_attribute_length;
     struct BE32_t extent;
     struct BE32_t extent_size;
@@ -172,6 +173,11 @@ static bool iso9660_cache_root(struct volume *vol,
         return false;
     }
 
+    // Extent locations count logical blocks, which are read here as sectors.
+    if (pv.LBA_size.little != ISO9660_SECTOR_SIZE) {
+        return false;
+    }
+
     *root_size = pv.root.extent_size.little;
 
     // Validate root directory size to prevent memory exhaustion, and require
@@ -182,7 +188,7 @@ static bool iso9660_cache_root(struct volume *vol,
     }
 
     *root = ext_mem_alloc(*root_size);
-    uint64_t offset = (uint64_t)pv.root.extent.little * ISO9660_SECTOR_SIZE;
+    uint64_t offset = ((uint64_t)pv.root.extent.little + pv.root.extended_attribute_length) * ISO9660_SECTOR_SIZE;
     if (!volume_read(vol, *root, offset, *root_size)) {
         pmm_free(*root, *root_size);
         return false;
@@ -584,7 +590,7 @@ struct file_handle *iso9660_open(struct volume *vol, const char *path) {
             return NULL;    // Not found :(
         }
 
-        next_sector = entry->extent.little;
+        next_sector = entry->extent.little + entry->extended_attribute_length;
         next_size = entry->extent_size.little;
 
         if (*path != '\0' && !(entry->flags & ISO9660_FLAG_DIRECTORY)) {
@@ -603,6 +609,8 @@ struct file_handle *iso9660_open(struct volume *vol, const char *path) {
             uint32_t extent_count = 1;
             uint64_t total_size = entry->extent_size.little;
             struct iso9660_directory_entry *e = entry;
+            // Interleaved file sections hold gaps between their file units.
+            uint8_t interleaved = entry->interleaved_unit_size | entry->interleaved_gap_size;
 
             // load_name returns false on the ISO-9660 fallback path but
             // still populates the buffer; treat an empty buffer as the only
@@ -625,6 +633,7 @@ struct file_handle *iso9660_open(struct volume *vol, const char *path) {
                 e = next;
                 extent_count++;
                 total_size += e->extent_size.little;
+                interleaved |= e->interleaved_unit_size | e->interleaved_gap_size;
 
                 // Sanity check to prevent runaway on corrupted directories
                 if (extent_count >= ISO9660_MAX_EXTENT_COUNT) {
@@ -632,7 +641,7 @@ struct file_handle *iso9660_open(struct volume *vol, const char *path) {
                 }
             }
 
-            if (e->flags & ISO9660_FLAG_MULTI_EXTENT) {
+            if (interleaved != 0 || (e->flags & ISO9660_FLAG_MULTI_EXTENT)) {
                 if (!first) {
                     pmm_free(current, current_size);
                 }
@@ -648,7 +657,7 @@ struct file_handle *iso9660_open(struct volume *vol, const char *path) {
             // Second pass: populate extent array
             e = entry;
             for (uint32_t i = 0; i < extent_count; i++) {
-                ret->extents[i].LBA = e->extent.little;
+                ret->extents[i].LBA = e->extent.little + e->extended_attribute_length;
                 ret->extents[i].size = e->extent_size.little;
                 if (i + 1 < extent_count) {
                     struct iso9660_directory_entry *next = iso9660_next_entry(e, buffer_end);
@@ -698,8 +707,8 @@ setup_handle:;
     struct file_handle *handle = ext_mem_alloc(sizeof(struct file_handle));
 
     handle->fd = ret;
-    handle->read = (void *)iso9660_read;
-    handle->close = (void *)iso9660_close;
+    handle->read = iso9660_read;
+    handle->close = iso9660_close;
     handle->size = ret->total_size;
     handle->vol = vol;
 #if defined (UEFI)

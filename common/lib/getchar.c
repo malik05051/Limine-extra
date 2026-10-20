@@ -76,6 +76,60 @@ static void append_input_sequence_digit(int *value, int digit) {
     }
 }
 
+static int input_sequence_key(int final, int param) {
+    switch (final) {
+        case 'A': {
+            return GETCHAR_CURSOR_UP;
+        }
+        case 'B': {
+            return GETCHAR_CURSOR_DOWN;
+        }
+        case 'C': {
+            return GETCHAR_CURSOR_RIGHT;
+        }
+        case 'D': {
+            return GETCHAR_CURSOR_LEFT;
+        }
+        case 'F': {
+            return GETCHAR_END;
+        }
+        case 'H': {
+            return GETCHAR_HOME;
+        }
+    }
+
+    // rxvt sends `$`, `^`, or `@` in place of `~` when Shift, Ctrl, or both
+    // are held.
+    if (final != '~' && final != '$' && final != '^' && final != '@') {
+        return 0;
+    }
+
+    switch (param) {
+        case 1:
+        case 7: {
+            return GETCHAR_HOME;
+        }
+        case 3: {
+            return GETCHAR_DELETE;
+        }
+        case 4:
+        case 8: {
+            return GETCHAR_END;
+        }
+        case 5: {
+            return GETCHAR_PGUP;
+        }
+        case 6: {
+            return GETCHAR_PGDOWN;
+        }
+        case 21: {
+            return GETCHAR_F10;
+        }
+    }
+
+    return 0;
+}
+
 int getchar(void) {
     for (;;) {
         int ret = pit_sleep_and_quit_on_keypress(65535);
@@ -111,28 +165,39 @@ int getchar_internal(uint8_t scancode, uint8_t ascii, uint32_t shift_state) {
         case 0x01:
             return GETCHAR_ESCAPE;
 #elif defined (UEFI)
-        case SCAN_F10:
+        case EFI_SCAN_F10: {
             return GETCHAR_F10;
-        case SCAN_LEFT:
+        }
+        case EFI_SCAN_LEFT: {
             return GETCHAR_CURSOR_LEFT;
-        case SCAN_RIGHT:
+        }
+        case EFI_SCAN_RIGHT: {
             return GETCHAR_CURSOR_RIGHT;
-        case SCAN_UP:
+        }
+        case EFI_SCAN_UP: {
             return GETCHAR_CURSOR_UP;
-        case SCAN_DOWN:
+        }
+        case EFI_SCAN_DOWN: {
             return GETCHAR_CURSOR_DOWN;
-        case SCAN_DELETE:
+        }
+        case EFI_SCAN_DELETE: {
             return GETCHAR_DELETE;
-        case SCAN_END:
+        }
+        case EFI_SCAN_END: {
             return GETCHAR_END;
-        case SCAN_HOME:
+        }
+        case EFI_SCAN_HOME: {
             return GETCHAR_HOME;
-        case SCAN_PAGE_UP:
+        }
+        case EFI_SCAN_PAGE_UP: {
             return GETCHAR_PGUP;
-        case SCAN_PAGE_DOWN:
+        }
+        case EFI_SCAN_PAGE_DOWN: {
             return GETCHAR_PGDOWN;
-        case SCAN_ESC:
+        }
+        case EFI_SCAN_ESC: {
             return GETCHAR_ESCAPE;
+        }
 #endif
     }
     switch (ascii) {
@@ -188,8 +253,9 @@ int _pit_sleep_and_quit_on_keypress(uint32_t ticks, uint32_t aux_poll,
 // BDA tick counter at 0x46c wraps at midnight.
 #define BDA_TICKS_PER_DAY 0x1800b0
 
-static int input_sequence(void) {
+static int input_sequence(bool ss3) {
     int val = 0;
+    bool first_param = true;
 
     for (;;) {
         int ret = -1;
@@ -203,40 +269,18 @@ static int input_sequence(void) {
             return 0;
         }
 
-        switch (ret) {
-            case 'A':
-                return GETCHAR_CURSOR_UP;
-            case 'B':
-                return GETCHAR_CURSOR_DOWN;
-            case 'C':
-                return GETCHAR_CURSOR_RIGHT;
-            case 'D':
-                return GETCHAR_CURSOR_LEFT;
-            case 'F':
-                return GETCHAR_END;
-            case 'H':
-                return GETCHAR_HOME;
+        // Parameter bytes are 0x30-0x3f (ECMA-48 5.4), SS3 takes none, and
+        // parameters past the first only add modifiers.
+        if (ss3 || ret < 0x30 || ret > 0x3f) {
+            return input_sequence_key(ret, val);
         }
 
-        if (ret > '9' || ret < '0') {
-            break;
+        if (ret > '9') {
+            first_param = false;
+        } else if (first_param) {
+            append_input_sequence_digit(&val, ret - '0');
         }
-
-        append_input_sequence_digit(&val, ret - '0');
     }
-
-    switch (val) {
-        case 3:
-            return GETCHAR_DELETE;
-        case 5:
-            return GETCHAR_PGUP;
-        case 6:
-            return GETCHAR_PGDOWN;
-        case 21:
-            return GETCHAR_F10;
-    }
-
-    return 0;
 }
 
 static int serial_input(void) {
@@ -256,8 +300,8 @@ again:
             if (ret == -1) {
                 return GETCHAR_ESCAPE;
             }
-            if (ret == '[') {
-                return input_sequence();
+            if (ret == '[' || ret == 'O') {
+                return input_sequence(ret == 'O');
             }
             goto again;
         case 0x7f:
@@ -346,13 +390,13 @@ int pit_sleep_and_quit_on_keypress(int seconds) {
 #endif
 
 #if defined (UEFI)
-static int input_sequence(bool ext,
-                   EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *exproto,
-                   EFI_SIMPLE_TEXT_IN_PROTOCOL *sproto) {
+static int input_sequence(bool ss3, bool ext,
+    EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *exproto, EFI_SIMPLE_TEXT_INPUT_PROTOCOL *sproto) {
     EFI_STATUS status;
     EFI_KEY_DATA kd;
 
     int val = 0;
+    bool first_param = true;
 
     for (;;) {
         if (ext == false) {
@@ -365,46 +409,24 @@ static int input_sequence(bool ext,
             return 0;
         }
 
-        switch (kd.Key.UnicodeChar) {
-            case 'A':
-                return GETCHAR_CURSOR_UP;
-            case 'B':
-                return GETCHAR_CURSOR_DOWN;
-            case 'C':
-                return GETCHAR_CURSOR_RIGHT;
-            case 'D':
-                return GETCHAR_CURSOR_LEFT;
-            case 'F':
-                return GETCHAR_END;
-            case 'H':
-                return GETCHAR_HOME;
+        // Parameter bytes are 0x30-0x3f (ECMA-48 5.4), SS3 takes none, and
+        // parameters past the first only add modifiers.
+        if (ss3 || kd.Key.UnicodeChar < 0x30 || kd.Key.UnicodeChar > 0x3f) {
+            return input_sequence_key(kd.Key.UnicodeChar, val);
         }
 
-        if (kd.Key.UnicodeChar > '9' || kd.Key.UnicodeChar < '0') {
-            break;
+        if (kd.Key.UnicodeChar > '9') {
+            first_param = false;
+        } else if (first_param) {
+            append_input_sequence_digit(&val, kd.Key.UnicodeChar - '0');
         }
-
-        append_input_sequence_digit(&val, kd.Key.UnicodeChar - '0');
     }
-
-    switch (val) {
-        case 3:
-            return GETCHAR_DELETE;
-        case 5:
-            return GETCHAR_PGUP;
-        case 6:
-            return GETCHAR_PGDOWN;
-        case 21:
-            return GETCHAR_F10;
-    }
-
-    return 0;
 }
 
 static int sleep_ms_core(uint64_t milliseconds, bool deliver_mouse) {
     EFI_KEY_DATA kd;
 
-    UINTN which;
+    EFI_UINTN which;
 
     EFI_EVENT events[18];
 
@@ -419,7 +441,7 @@ static int sleep_ms_core(uint64_t milliseconds, bool deliver_mouse) {
     EFI_GUID exproto_guid = EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL_GUID;
     EFI_GUID sproto_guid = EFI_SIMPLE_TEXT_INPUT_PROTOCOL_GUID;
     EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *exproto = NULL;
-    EFI_SIMPLE_TEXT_IN_PROTOCOL *sproto = NULL;
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL *sproto = NULL;
 
     bool use_sproto = false;
 
@@ -444,9 +466,9 @@ static int sleep_ms_core(uint64_t milliseconds, bool deliver_mouse) {
     }
 
 restart:
-    gBS->CreateEvent(EVT_TIMER, TPL_CALLBACK, NULL, NULL, &events[1]);
+    gBS->CreateEvent(EFI_EVT_TIMER, EFI_TPL_CALLBACK, NULL, NULL, &events[1]);
 
-    gBS->SetTimer(events[1], TimerRelative,
+    gBS->SetTimer(events[1], EfiTimerRelative,
                   milliseconds > UINT64_MAX / 10000 ? UINT64_MAX : milliseconds * 10000);
 
 again:
@@ -488,12 +510,12 @@ again:
         return '\b';
     }
 
-    if (kd.Key.ScanCode == SCAN_ESC) {
+    if (kd.Key.ScanCode == EFI_SCAN_ESC) {
         gBS->CloseEvent(events[1]);
 
-        gBS->CreateEvent(EVT_TIMER, TPL_CALLBACK, NULL, NULL, &events[1]);
+        gBS->CreateEvent(EFI_EVT_TIMER, EFI_TPL_CALLBACK, NULL, NULL, &events[1]);
 
-        gBS->SetTimer(events[1], TimerRelative, 100000);
+        gBS->SetTimer(events[1], EfiTimerRelative, 100000);
 
         gBS->WaitForEvent(2, events, &which);
 
@@ -514,11 +536,17 @@ again:
             goto restart;
         }
 
-        if (kd.Key.UnicodeChar == '[') {
-            return input_sequence(!use_sproto, exproto, sproto);
+        if (kd.Key.UnicodeChar == '[' || kd.Key.UnicodeChar == 'O') {
+            return input_sequence(kd.Key.UnicodeChar == 'O', !use_sproto, exproto, sproto);
         }
 
         goto restart;
+    }
+
+    // getchar_internal() takes 8-bit codes, and narrowing a wider one would
+    // alias an unrelated key. None of the scan codes it handles is wider.
+    if (kd.Key.ScanCode > 0xff || kd.Key.UnicodeChar > 0xff) {
+        goto again;
     }
 
     int ret = getchar_internal(kd.Key.ScanCode, kd.Key.UnicodeChar,

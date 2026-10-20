@@ -50,6 +50,7 @@
 #define SHT_RELA     0x00000004
 #define SHN_UNDEF    0x00000000
 #define SHN_ABS      0x0000fff1
+#define SHN_XINDEX 0x0000ffff
 #define STB_WEAK     0x00000002
 #define R_X86_64_NONE      0x00000000
 #define R_AARCH64_NONE     0x00000000
@@ -143,7 +144,7 @@ static bool elf32_validate(struct elf32_hdr *hdr) {
         panic(true, "elf: Not a Little-endian ELF file.");
     }
 
-    if (hdr->machine != ARCH_X86_32) {
+    if (hdr->machine != ARCH_X86_32 || hdr->ident[EI_CLASS] != ELFCLASS32) {
         panic(true, "elf: Not an IA-32 ELF file.");
     }
 
@@ -166,11 +167,11 @@ static bool elf64_validate(struct elf64_hdr *hdr) {
     }
 
 #if defined (__x86_64__) || defined (__i386__)
-    if (hdr->machine != ARCH_X86_64) {
+    if (hdr->machine != ARCH_X86_64 || hdr->ident[EI_CLASS] != ELFCLASS64) {
         panic(true, "elf: Not an x86-64 ELF file.");
     }
 #elif defined (__aarch64__)
-    if (hdr->machine != ARCH_AARCH64) {
+    if (hdr->machine != ARCH_AARCH64 || hdr->ident[EI_CLASS] != ELFCLASS64) {
         panic(true, "elf: Not an aarch64 ELF file.");
     }
 #elif defined (__riscv)
@@ -205,20 +206,86 @@ int elf_bits(uint8_t *elf, size_t file_size) {
         return -1;
     }
 
+    int bits;
+    if (hdr->ident[EI_CLASS] == ELFCLASS64) {
+        bits = 64;
+    } else if (hdr->ident[EI_CLASS] == ELFCLASS32) {
+        bits = 32;
+    } else {
+        return -1;
+    }
+
     switch (hdr->machine) {
         case ARCH_X86_64:
         case ARCH_AARCH64:
-            return 64;
+            return bits == 64 ? 64 : -1;
         case ARCH_RISCV:
         case ARCH_LOONGARCH:
-            if (hdr->ident[EI_CLASS] == ELFCLASS64) return 64;
-            if (hdr->ident[EI_CLASS] == ELFCLASS32) return 32;
-            return -1;
+            return bits;
         case ARCH_X86_32:
-            return 32;
+            return bits == 32 ? 32 : -1;
         default:
             return -1;
     }
+}
+
+// The gABI moves a section count or name string table index that reaches
+// SHN_LORESERVE into section header 0, as its sh_size or sh_link.
+static bool elf64_section_numbering(uint8_t *elf, size_t file_size, struct elf64_hdr *hdr,
+        uint32_t *sh_num, uint32_t *shstrndx) {
+    *sh_num = hdr->sh_num;
+    *shstrndx = hdr->shstrndx;
+
+    if (hdr->shoff == 0 || (hdr->sh_num != 0 && hdr->shstrndx != SHN_XINDEX)) {
+        return true;
+    }
+
+    if (hdr->shdr_size < sizeof(struct elf64_shdr)
+     || hdr->shoff > file_size || sizeof(struct elf64_shdr) > file_size - hdr->shoff) {
+        return false;
+    }
+
+    struct elf64_shdr *shdr = (void *)elf + hdr->shoff;
+
+    if (hdr->sh_num == 0) {
+        if (shdr->sh_size > UINT32_MAX) {
+            return false;
+        }
+        *sh_num = shdr->sh_size;
+    }
+
+    if (hdr->shstrndx == SHN_XINDEX) {
+        *shstrndx = shdr->sh_link;
+    }
+
+    return true;
+}
+
+static bool elf32_section_numbering(uint8_t *elf, size_t file_size, struct elf32_hdr *hdr,
+        uint32_t *sh_num, uint32_t *shstrndx) {
+    *sh_num = hdr->sh_num;
+    *shstrndx = hdr->shstrndx;
+
+    if (hdr->shoff == 0 || (hdr->sh_num != 0 && hdr->shstrndx != SHN_XINDEX)) {
+        return true;
+    }
+
+    if (hdr->shdr_size < sizeof(struct elf32_shdr)
+     || hdr->shoff > file_size || sizeof(struct elf32_shdr) > file_size - hdr->shoff) {
+        return false;
+    }
+
+    struct elf32_shdr *shdr = (void *)elf + hdr->shoff;
+
+    if (hdr->sh_num == 0) {
+        *sh_num = shdr->sh_size;
+    }
+
+    if (hdr->shstrndx == SHN_XINDEX) {
+        *shstrndx = shdr->sh_link;
+    }
+
+    return true;
 }
 
 struct elf_section_hdr_info elf64_section_hdr_info(uint8_t *elf, size_t file_size) {
@@ -228,14 +295,19 @@ struct elf_section_hdr_info elf64_section_hdr_info(uint8_t *elf, size_t file_siz
 
     elf64_validate(hdr);
 
-    if (CHECKED_ADD((uint64_t)hdr->sh_num * hdr->shdr_size,
+    uint32_t sh_num, shstrndx;
+    if (!elf64_section_numbering(elf, file_size, hdr, &sh_num, &shstrndx)) {
+        return info;
+    }
+
+    if (CHECKED_ADD((uint64_t)sh_num * hdr->shdr_size,
             hdr->shoff, return info) > file_size) {
         return info;
     }
 
-    info.num = hdr->sh_num;
+    info.num = sh_num;
     info.section_entry_size = hdr->shdr_size;
-    info.str_section_idx = hdr->shstrndx;
+    info.str_section_idx = shstrndx;
     info.section_offset = hdr->shoff;
 
     return info;
@@ -248,14 +320,19 @@ struct elf_section_hdr_info elf32_section_hdr_info(uint8_t *elf, size_t file_siz
 
     elf32_validate(hdr);
 
-    if (CHECKED_ADD((uint64_t)hdr->sh_num * hdr->shdr_size,
+    uint32_t sh_num, shstrndx;
+    if (!elf32_section_numbering(elf, file_size, hdr, &sh_num, &shstrndx)) {
+        return info;
+    }
+
+    if (CHECKED_ADD((uint64_t)sh_num * hdr->shdr_size,
             hdr->shoff, return info) > file_size) {
         return info;
     }
 
-    info.num = hdr->sh_num;
+    info.num = sh_num;
     info.section_entry_size = hdr->shdr_size;
-    info.str_section_idx = hdr->shstrndx;
+    info.str_section_idx = shstrndx;
     info.section_offset = hdr->shoff;
 
     return info;
@@ -444,8 +521,8 @@ static bool elf64_prepare_relocations(uint8_t *elf, size_t file_size, struct elf
     }
 end_of_pt_segment:
 
-    // The stride feeds both the DT_RELA and the DT_JMPREL walk, and both
-    // dereference a full struct elf64_rela at every step.
+    // The stride feeds the DT_RELA walk, which dereferences a full struct
+    // elf64_rela at every step.
     if (rela_ent != 0 && rela_ent < sizeof(struct elf64_rela)) {
         panic(true, "elf: rela_ent < sizeof(struct elf64_rela)");
     }
@@ -486,8 +563,8 @@ end_of_pt_segment:
         panic(true, "elf: DT_PLTRELSZ without DT_JMPREL");
     }
 
-    // Both the table and the stride, since every walk here steps by an entry
-    // size the file supplies.
+    // Both the table and, where the file supplies it, the stride the walk
+    // steps by.
     if (rela_offset % 8 != 0 || rela_ent % 8 != 0
      || relr_offset % 8 != 0
      || symtab_offset % 8 != 0 || symtab_ent % 8 != 0
@@ -520,17 +597,17 @@ end_of_pt_segment:
         }
         elf64_add_relocation_count(&relocs_i, rela_size / rela_ent);
     }
+    // DT_RELAENT need only accompany DT_RELA, and DT_PLTREL already gives the
+    // entry type, whose size is fixed.
+    size_t jmprel_start = relocs_i;
     if (dt_pltrelsz != 0) {
         if (dt_pltrel != DT_RELA) {
             panic(true, "elf: dt_pltrel != DT_RELA");
         }
-        if (rela_ent == 0) {
-            panic(true, "elf: dt_pltrelsz != 0 but rela_ent == 0");
+        if (dt_pltrelsz % sizeof(struct elf64_rela) != 0) {
+            panic(true, "elf: dt_pltrelsz not a multiple of sizeof(struct elf64_rela)");
         }
-        if (dt_pltrelsz % rela_ent != 0) {
-            panic(true, "elf: dt_pltrelsz not a multiple of rela_ent");
-        }
-        elf64_add_relocation_count(&relocs_i, dt_pltrelsz / rela_ent);
+        elf64_add_relocation_count(&relocs_i, dt_pltrelsz / sizeof(struct elf64_rela));
     }
     struct elf64_rela **relocs = ext_mem_alloc_counted(relocs_i, sizeof(struct elf64_rela *));
 
@@ -573,7 +650,7 @@ end_of_pt_segment:
     }
 
     if (dt_pltrelsz != 0) {
-        for (uint64_t i = relr_count + rela_size / rela_ent, offset = 0; offset < dt_pltrelsz; offset += rela_ent) {
+        for (uint64_t i = jmprel_start, offset = 0; offset < dt_pltrelsz; offset += sizeof(struct elf64_rela)) {
             relocs[i++] = (void *)elf + (dt_jmprel + offset);
         }
     }
@@ -788,7 +865,8 @@ bool elf64_load_section(uint8_t *elf, size_t file_size, void *buffer, const char
 
     elf64_validate(hdr);
 
-    if (hdr->sh_num == 0) {
+    uint32_t sh_num, shstrndx;
+    if (!elf64_section_numbering(elf, file_size, hdr, &sh_num, &shstrndx) || sh_num == 0) {
         return false;
     }
 
@@ -796,19 +874,19 @@ bool elf64_load_section(uint8_t *elf, size_t file_size, void *buffer, const char
         panic(true, "elf: shdr_size < sizeof(struct elf64_shdr)");
     }
 
-    if (hdr->shstrndx >= hdr->sh_num) {
+    if (shstrndx == SHN_UNDEF || shstrndx >= sh_num) {
         return false;
     }
 
     // Validate section header table is within file bounds
     uint64_t shdr_table_end = CHECKED_ADD(hdr->shoff,
-        CHECKED_MUL((uint64_t)hdr->sh_num, (uint64_t)hdr->shdr_size, return false),
+        CHECKED_MUL((uint64_t)sh_num, (uint64_t)hdr->shdr_size, return false),
         return false);
     if (shdr_table_end > file_size) {
         return false;
     }
 
-    struct elf64_shdr *shstrtab = (void *)elf + (hdr->shoff + hdr->shstrndx * hdr->shdr_size);
+    struct elf64_shdr *shstrtab = (void *)elf + (hdr->shoff + (uint64_t)shstrndx * hdr->shdr_size);
 
     // Validate shstrtab offset and size are within file bounds
     if (shstrtab->sh_offset >= file_size || shstrtab->sh_size > file_size - shstrtab->sh_offset) {
@@ -817,7 +895,7 @@ bool elf64_load_section(uint8_t *elf, size_t file_size, void *buffer, const char
 
     char *names = (void *)elf + shstrtab->sh_offset;
 
-    for (uint16_t i = 0; i < hdr->sh_num; i++) {
+    for (uint64_t i = 0; i < sh_num; i++) {
         struct elf64_shdr *section = (void *)elf + (hdr->shoff + i * hdr->shdr_size);
 
         // Validate sh_name is within the string table

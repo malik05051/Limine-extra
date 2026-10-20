@@ -14,13 +14,22 @@
 #define INVALID_TABLE (-2)
 #define END_OF_TABLE  (-3)
 
+struct mbr_entry {
+    uint8_t status;
+    uint8_t chs_first_sect[3];
+    uint8_t type;
+    uint8_t chs_last_sect[3];
+    uint32_t first_sect;
+    uint32_t sect_count;
+} __attribute__((packed));
+
 struct volume {
 #if defined (UEFI)
     EFI_HANDLE efi_handle;
 
     // Block storage
     EFI_HANDLE efi_part_handle;
-    EFI_BLOCK_IO *block_io;
+    EFI_BLOCK_IO_PROTOCOL *block_io;
 
     // PXE
     EFI_PXE_BASE_CODE_PROTOCOL *pxe_base_code;
@@ -48,11 +57,13 @@ struct volume {
     uint8_t *cache;
     uint64_t cached_block;
 
-    // Built on the first logical partition probe and kept for the rest.
+    // The extended partition whose chain the last logical partition probe
+    // walked, which the next probe carries on from.
     struct volume *ebr_part;
     int ebr_walk_index;
-    uint64_t ebr_walk_sector;
+    int ebr_walk_depth;
     uint64_t ebr_walk_size;
+    uint64_t *ebr_walk_chain;
 
     uint64_t first_sect;
     uint64_t sect_count;
