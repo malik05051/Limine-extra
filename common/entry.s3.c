@@ -26,6 +26,7 @@
 #include <sys/lapic.h>
 #include <lib/getchar.h>
 #include <sys/cpu.h>
+#include <libfdt.h>
 
 void stage3_common(void);
 
@@ -79,12 +80,12 @@ noreturn void uefi_entry(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) 
     // Detect UEFI Secure Boot
     {
         EFI_GUID global_variable = EFI_GLOBAL_VARIABLE;
-        UINT8 secure_boot = 0;
-        UINTN sb_size = sizeof(secure_boot);
+        EFI_UINT8 secure_boot = 0;
+        EFI_UINTN sb_size = sizeof(secure_boot);
         EFI_STATUS sb_status = gRT->GetVariable(L"SecureBoot", &global_variable, NULL, &sb_size, &secure_boot);
         if (sb_status == EFI_SUCCESS && secure_boot == 1) {
-            UINT8 setup_mode = 0;
-            UINTN sm_size = sizeof(setup_mode);
+            EFI_UINT8 setup_mode = 0;
+            EFI_UINTN sm_size = sizeof(setup_mode);
             EFI_STATUS sm_status = gRT->GetVariable(L"SetupMode", &global_variable, NULL, &sm_size, &setup_mode);
             if (sm_status != EFI_SUCCESS || setup_mode == 0) {
                 secure_boot_active = true;
@@ -178,6 +179,47 @@ opened:
 }
 #endif
 
+#if defined (__riscv) && defined (UEFI)
+// Firmware predating RISCV_EFI_BOOT_PROTOCOL passes the boot hart in the
+// device tree it publishes instead.
+static bool get_dtb_boot_hartid(size_t *hartid) {
+    EFI_GUID dtb_guid = EFI_DTB_TABLE_GUID;
+    void *dtb = NULL;
+
+    for (size_t i = 0; i < gST->NumberOfTableEntries; i++) {
+        if (memcmp(&gST->ConfigurationTable[i].VendorGuid, &dtb_guid, sizeof(EFI_GUID)) == 0) {
+            dtb = gST->ConfigurationTable[i].VendorTable;
+            break;
+        }
+    }
+
+    if (dtb == NULL || fdt_check_header(dtb) != 0) {
+        return false;
+    }
+
+    int chosen = fdt_path_offset(dtb, "/chosen");
+    if (chosen < 0) {
+        return false;
+    }
+
+    int len;
+    const void *prop = fdt_getprop(dtb, chosen, "boot-hartid", &len);
+    if (prop == NULL) {
+        return false;
+    }
+
+    if (len == 8) {
+        *hartid = fdt64_ld(prop);
+    } else if (len == 4) {
+        *hartid = fdt32_ld(prop);
+    } else {
+        return false;
+    }
+
+    return true;
+}
+#endif
+
 noreturn void stage3_common(void) {
 #if defined (__x86_64__) || defined (__i386__)
     init_flush_irqs();
@@ -186,9 +228,11 @@ noreturn void stage3_common(void) {
 
 #if defined (__riscv)
 #if defined (UEFI)
-    RISCV_EFI_BOOT_PROTOCOL *rv_proto = get_riscv_boot_protocol();
+    EFI_RISCV_EFI_BOOT_PROTOCOL *rv_proto = get_riscv_boot_protocol();
     if (rv_proto == NULL || rv_proto->GetBootHartId(rv_proto, &bsp_hartid) != EFI_SUCCESS) {
-        panic(false, "failed to get BSP's hartid");
+        if (!get_dtb_boot_hartid(&bsp_hartid)) {
+            panic(false, "failed to get BSP's hartid");
+        }
     }
 #else
 #error riscv: only UEFI is supported

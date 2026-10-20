@@ -23,6 +23,16 @@ struct file_handle *uri_open(char *uri, uint32_t type, bool allow_high_mem
 #endif
 );
 
+// Same as uri_open, for a resource the boot can do without: a problem that
+// would return to the menu is printed instead and NULL is returned, and so is
+// a hash mismatch, whatever hash_mismatch_panic says.
+struct file_handle *uri_open_optional(char *uri, uint32_t type, bool allow_high_mem
+#if defined (__i386__)
+    , void (*memcpy_to_64)(uint64_t dst, void *src, size_t count)
+    , void (*memcpy_from_64)(void *dst, uint64_t src, size_t count)
+#endif
+);
+
 #if defined (UEFI)
 
 // Opens the file a boot(), guid(), uuid() or fslabel() URI names for partial

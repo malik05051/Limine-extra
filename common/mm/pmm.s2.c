@@ -331,28 +331,28 @@ extern symbol __slide, __image_base, __image_end;
 // Some UEFI implementations cannot handle allocations spanning a large
 // fraction of physical memory. Reduce the request cap no lower than 64MiB,
 // and use 1MiB requests only to recover a failed chunk.
-#define UEFI_ALLOC_MAX_PAGES      ((UINTN)(0x40000000 / PAGE_SIZE))
-#define UEFI_ALLOC_MIN_PAGES      ((UINTN)(0x04000000 / PAGE_SIZE))
-#define UEFI_ALLOC_FALLBACK_PAGES ((UINTN)(0x00100000 / PAGE_SIZE))
+#define UEFI_ALLOC_MAX_PAGES ((EFI_UINTN)(0x40000000 / PAGE_SIZE))
+#define UEFI_ALLOC_MIN_PAGES ((EFI_UINTN)(0x04000000 / PAGE_SIZE))
+#define UEFI_ALLOC_FALLBACK_PAGES ((EFI_UINTN)(0x00100000 / PAGE_SIZE))
 
-static UINTN uefi_alloc_chunk_pages = UEFI_ALLOC_MAX_PAGES;
+static EFI_UINTN uefi_alloc_chunk_pages = UEFI_ALLOC_MAX_PAGES;
 
 static void pmm_mark_uefi_pages_unclaimed(EFI_PHYSICAL_ADDRESS base,
-                                          UINTN page_count) {
+    EFI_UINTN page_count) {
     memmap_alloc_range(base, (uint64_t)page_count * PAGE_SIZE,
                        MEMMAP_EFI_RECLAIMABLE, MEMMAP_USABLE,
                        true, false, false);
 }
 
 static void pmm_claim_uefi_pages_fallback(EFI_PHYSICAL_ADDRESS base,
-                                          UINTN page_count, UINTN step_pages) {
+    EFI_UINTN page_count, EFI_UINTN step_pages) {
     EFI_PHYSICAL_ADDRESS failed_base = 0;
-    UINTN failed_pages = 0;
+    EFI_UINTN failed_pages = 0;
 
     while (page_count != 0) {
-        UINTN chunk_pages = MIN(page_count, step_pages);
+        EFI_UINTN chunk_pages = MIN(page_count, step_pages);
         EFI_PHYSICAL_ADDRESS alloc_base = base;
-        EFI_STATUS status = gBS->AllocatePages(AllocateAddress,
+        EFI_STATUS status = gBS->AllocatePages(EfiAllocateAddress,
                                                EfiLoaderCode,
                                                chunk_pages,
                                                &alloc_base);
@@ -379,18 +379,17 @@ static void pmm_claim_uefi_pages_fallback(EFI_PHYSICAL_ADDRESS base,
     }
 }
 
-static void pmm_claim_uefi_pages(EFI_PHYSICAL_ADDRESS base, UINTN page_count) {
+static void pmm_claim_uefi_pages(EFI_PHYSICAL_ADDRESS base, EFI_UINTN page_count) {
     while (page_count != 0) {
-        UINTN chunk_pages = MIN(page_count, uefi_alloc_chunk_pages);
+        EFI_UINTN chunk_pages = MIN(page_count, uefi_alloc_chunk_pages);
         EFI_PHYSICAL_ADDRESS alloc_base = base;
-        EFI_STATUS status = gBS->AllocatePages(AllocateAddress,
+        EFI_STATUS status = gBS->AllocatePages(EfiAllocateAddress,
                                                EfiLoaderCode,
                                                chunk_pages,
                                                &alloc_base);
 
         if (status && chunk_pages > UEFI_ALLOC_MIN_PAGES) {
-            UINTN new_chunk_pages = MAX(chunk_pages / 2,
-                                        UEFI_ALLOC_MIN_PAGES);
+            EFI_UINTN new_chunk_pages = MAX(chunk_pages / 2, UEFI_ALLOC_MIN_PAGES);
             uefi_alloc_chunk_pages = MIN(uefi_alloc_chunk_pages,
                                          new_chunk_pages);
             continue;
@@ -411,7 +410,7 @@ void init_memmap(void) {
 
     EFI_MEMORY_DESCRIPTOR tmp_mmap[1];
     efi_mmap_size = sizeof(tmp_mmap);
-    UINTN mmap_key = 0;
+    EFI_UINTN mmap_key = 0;
 
     gBS->GetMemoryMap(&efi_mmap_size, tmp_mmap, &mmap_key, &efi_desc_size, &efi_desc_ver);
 
@@ -504,6 +503,10 @@ void init_memmap(void) {
     }
 
     pmm_sanitise_entries(memmap, &memmap_entries, false);
+
+    // Page 0 sits at the null pointer and must never be handed out. Left to
+    // the firmware, it still reaches kernels, typed by the final EFI memory map.
+    memmap_alloc_range(0, PAGE_SIZE, MEMMAP_EFI_RECLAIMABLE, MEMMAP_USABLE, false, false, false);
 
     allocations_disallowed = false;
 
@@ -739,7 +742,7 @@ void *ext_mem_alloc_type_aligned(uint64_t count, uint32_t type, size_t alignment
 }
 
 // Allocate memory top down.
-void *ext_mem_alloc_type_aligned_mode(uint64_t count, uint32_t type, size_t alignment, bool allow_high_allocs) {
+static void *ext_mem_alloc_impl(uint64_t count, uint32_t type, size_t alignment, bool allow_high_allocs, bool do_panic) {
 #if !defined (__x86_64__) && !defined (__i386__)
     (void)allow_high_allocs;
 #endif
@@ -822,6 +825,77 @@ again:
         goto again;
     }
 #endif
+
+    if (!do_panic) {
+        return NULL;
+    }
+
+    panic(false, "High memory allocator: Out of memory");
+}
+
+void *ext_mem_alloc_type_aligned_mode(uint64_t count, uint32_t type, size_t alignment, bool allow_high_allocs) {
+    return ext_mem_alloc_impl(count, type, alignment, allow_high_allocs, true);
+}
+
+void *ext_mem_alloc_nopanic(uint64_t count) {
+    return ext_mem_alloc_impl(count, MEMMAP_BOOTLOADER_RECLAIMABLE, 4096, false, false);
+}
+
+// Allocate memory that ends at or below limit, top down, or bottom up if
+// bottom_up is set.
+void *ext_mem_alloc_type_aligned_below(uint64_t count, uint32_t type, size_t alignment, uint64_t limit, bool bottom_up) {
+    if (count == 0) {
+        count = 1;
+    }
+
+    count = CHECKED_ADD(count, alignment - 1,
+        panic(false, "ext_mem_alloc: count overflows when aligning"));
+    count = ALIGN_DOWN(count, alignment);
+
+    if (allocations_disallowed) {
+        panic(false, "Memory allocations disallowed");
+    }
+
+    for (size_t n = 0; n < memmap_entries; n++) {
+        size_t i = bottom_up ? n : memmap_entries - 1 - n;
+
+        if (memmap[i].type != MEMMAP_USABLE) {
+            continue;
+        }
+
+        uint64_t entry_base = memmap[i].base;
+        uint64_t entry_top = CHECKED_ADD(memmap[i].base, memmap[i].length, continue);
+
+        if (entry_top > limit) {
+            entry_top = limit;
+        }
+
+        if (entry_base >= entry_top || entry_top - entry_base < count) {
+            continue;
+        }
+
+        uint64_t alloc_base;
+        if (bottom_up) {
+            alloc_base = ALIGN_UP(entry_base, alignment, continue);
+            if (alloc_base > entry_top - count) {
+                continue;
+            }
+        } else {
+            alloc_base = ALIGN_DOWN(entry_top - count, alignment);
+            if (alloc_base < entry_base) {
+                continue;
+            }
+        }
+
+        memmap_alloc_range(alloc_base, count, type, MEMMAP_USABLE, true, false, false);
+
+        void *ret = (void *)(uintptr_t)alloc_base;
+        memset(ret, 0, count);
+
+        pmm_sanitise_entries(memmap, &memmap_entries, false);
+
+        return ret;
+    }
 
     panic(false, "High memory allocator: Out of memory");
 }

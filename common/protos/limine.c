@@ -1423,6 +1423,10 @@ FEAT_START
                 panic(true, "limine: Internal module path or string is outside the executable");
             }
 
+            // Data that comes with a response belongs in bootloader-reclaimable
+            // memory, not in the executable.
+            module_cmdline = strdup(module_cmdline);
+
             bool module_compressed = internal_module->flags & LIMINE_INTERNAL_MODULE_COMPRESSED;
 
             // Validate path length to prevent buffer overflow
@@ -1499,6 +1503,7 @@ FEAT_START
             if (module_path_allocated) {
                 pmm_free(module_path, 1024);
             }
+            pmm_free(module_cmdline, strlen(module_cmdline) + 1);
             continue;
         }
         struct limine_file *l = &modules[final_module_count++];
@@ -1916,6 +1921,7 @@ FEAT_START
 FEAT_END
 
     // Bootloader Performance
+    struct limine_bootloader_performance_response *perf_response = NULL;
 FEAT_START
     if (usec_at_bootloader_entry == 0) {
         break;
@@ -1926,12 +1932,11 @@ FEAT_START
         break;
     }
 
-    struct limine_bootloader_performance_response *perf_response =
-        ext_mem_alloc(sizeof(struct limine_bootloader_performance_response));
+    perf_response = ext_mem_alloc(sizeof(struct limine_bootloader_performance_response));
 
     perf_response->reset_usec = 0;
     perf_response->init_usec = usec_at_bootloader_entry;
-    perf_response->exec_usec = rdtsc_usec();
+    // exec_usec is taken at the jump to the executable, below.
     perf_request->response = reported_addr(perf_response);
 FEAT_END
 
@@ -1939,6 +1944,7 @@ FEAT_END
     // TPM event log feature. Processed last so GetEventLog snapshots a log
     // containing all of Limine's extends; later extends would land in the
     // final-events table instead.
+    struct limine_tpm_event_log_response *tpm_event_log_response = NULL;
 FEAT_START
     struct limine_tpm_event_log_request *tpm_event_log_request = get_request(tpm_event_log_request, LIMINE_TPM_EVENT_LOG_REQUEST_ID);
     if (tpm_event_log_request == NULL) {
@@ -1952,8 +1958,7 @@ FEAT_START
         break; // no TPM or capture failed
     }
 
-    struct limine_tpm_event_log_response *tpm_event_log_response =
-        ext_mem_alloc(sizeof(struct limine_tpm_event_log_response));
+    tpm_event_log_response = ext_mem_alloc(sizeof(struct limine_tpm_event_log_response));
 
     tpm_event_log_response->format = tpm_event_log_format;
     tpm_event_log_response->size = tpm_event_log_size;
@@ -1974,6 +1979,12 @@ FEAT_END
 #endif
 
     efi_exit_boot_services();
+
+    // ExitBootServices() measures into PCR 5, and only the final events table
+    // records those events.
+    if (tpm_event_log_response != NULL) {
+        tpm_event_log_response->size = tpm_append_final_events();
+    }
 #endif
 
     // EFI memory map
@@ -2032,6 +2043,7 @@ FEAT_START
                         paging_mode,
                         pagemap, mp_request->flags & LIMINE_MP_REQUEST_X86_64_X2APIC, nx_available,
                         direct_map_offset, true);
+    bool x2apic_enabled = (mp_request->flags & LIMINE_MP_REQUEST_X86_64_X2APIC) && (rdmsr(0x1b) & (1 << 10));
 #elif defined (__aarch64__)
     uint64_t bsp_mpidr;
 
@@ -2048,8 +2060,37 @@ FEAT_START
 #error Unknown architecture
 #endif
 
+    // PROTOCOL.md promises a response whenever the request is supported, so
+    // the BSP alone stands in where the CPUs could not be enumerated.
     if (mp_info == NULL) {
-        break;
+        mp_info = ext_mem_alloc(sizeof(struct limine_mp_info));
+        cpu_count = 1;
+#if defined (__x86_64__) || defined (__i386__)
+        // init_smp() can give up before it enables x2APIC. Without a local
+        // APIC, the ID is the initial one that CPUID reports.
+        bool have_lapic = lapic_check();
+        x2apic_enabled = have_lapic && (rdmsr(0x1b) & (1 << 10));
+        if (x2apic_enabled) {
+            bsp_lapic_id = x2apic_read(LAPIC_REG_ID);
+        } else if (have_lapic) {
+            bsp_lapic_id = lapic_read(LAPIC_REG_ID) >> 24;
+        } else {
+            bsp_lapic_id = cpuid(1, 0, &eax, &ebx, &ecx, &edx) ? ebx >> 24 : 0;
+        }
+        mp_info->lapic_id = bsp_lapic_id;
+#elif defined (__aarch64__)
+        asm volatile ("mrs %0, mpidr_el1" : "=r"(bsp_mpidr));
+        // The affinity fields alone, as PROTOCOL.md has it.
+        bsp_mpidr &= 0xff00ffffff;
+        mp_info->mpidr = bsp_mpidr;
+#elif defined (__riscv)
+        mp_info->hartid = bsp_hartid;
+#elif defined (__loongarch64)
+        bsp_phys_id = csr_read32(0x20); // CSR.CPUID
+        mp_info->phys_id = bsp_phys_id;
+#else
+#error Unknown architecture
+#endif
     }
 
     for (size_t i = 0; i < cpu_count; i++) {
@@ -2081,8 +2122,7 @@ FEAT_START
         ext_mem_alloc(sizeof(struct limine_mp_response));
 
 #if defined (__x86_64__) || defined (__i386__)
-    mp_response->flags |=
-        (mp_request->flags & LIMINE_MP_REQUEST_X86_64_X2APIC) && x2apic_check() ? LIMINE_MP_RESPONSE_X86_64_X2APIC : 0;
+    mp_response->flags |= x2apic_enabled ? LIMINE_MP_RESPONSE_X86_64_X2APIC : 0;
     mp_response->bsp_lapic_id = bsp_lapic_id;
 #elif defined (__aarch64__)
     mp_response->bsp_mpidr = bsp_mpidr;
@@ -2240,6 +2280,10 @@ FEAT_END
     void *spinup_fn = limine_spinup_32;
 #endif
 
+    if (perf_response != NULL) {
+        perf_response->exec_usec = rdtsc_usec();
+    }
+
     common_spinup(spinup_fn, 11,
         paging_mode, (uint32_t)(uintptr_t)pagemap.top_level,
         (uint32_t)entry_point, (uint32_t)(entry_point >> 32),
@@ -2252,6 +2296,10 @@ FEAT_END
     vmm_assert_4k_pages();
 
     uint64_t reported_stack = reported_addr(stack);
+
+    if (perf_response != NULL) {
+        perf_response->exec_usec = rdtsc_usec();
+    }
 
     if (want_el2) {
         enter_in_el2(entry_point, reported_stack, LIMINE_SCTLR, LIMINE_MAIR(fb_attr), LIMINE_TCR(tsz, pa, ds),
@@ -2268,9 +2316,17 @@ FEAT_END
     uint64_t reported_stack = reported_addr(stack);
     uint64_t satp = make_satp(pagemap.paging_mode, pagemap.top_level);
 
+    if (perf_response != NULL) {
+        perf_response->exec_usec = rdtsc_usec();
+    }
+
     riscv_spinup(entry_point, reported_stack, satp, direct_map_offset);
 #elif defined (__loongarch64)
     uint64_t reported_stack = reported_addr(stack);
+
+    if (perf_response != NULL) {
+        perf_response->exec_usec = rdtsc_usec();
+    }
 
     loongarch_spinup(entry_point, reported_stack, (uint64_t)pagemap.pgd[0], (uint64_t)pagemap.pgd[1],
                      direct_map_offset);

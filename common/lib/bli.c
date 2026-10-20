@@ -164,23 +164,29 @@ static void bli_set_image_identifier(void) {
     size_t len = 0;
 
     for (EFI_DEVICE_PATH_PROTOCOL *node = loaded_image->FilePath;
-         !IsDevicePathEnd(node); node = NextDevicePathNode(node)) {
-        size_t node_len = DevicePathNodeLength(node);
+         !EfiIsDevicePathEnd(node); node = EfiNextDevicePathNode(node)) {
+        size_t node_len = EfiDevicePathNodeLength(node);
         if (node_len < sizeof(EFI_DEVICE_PATH_PROTOCOL)) {
             return;
         }
-        if (DevicePathType(node) != MEDIA_DEVICE_PATH
-         || DevicePathSubType(node) != MEDIA_FILEPATH_DP) {
+        if (EfiDevicePathType(node) != EFI_MEDIA_DEVICE_PATH
+         || EfiDevicePathSubType(node) != EFI_MEDIA_FILEPATH_DP) {
             continue;
         }
 
-        wchar_t *name = (wchar_t *)((FILEPATH_DEVICE_PATH *)node)->PathName;
-        size_t chars = (node_len - sizeof(EFI_DEVICE_PATH_PROTOCOL)) / sizeof(wchar_t);
-        for (size_t i = 0; i < chars && name[i] != L'\0'; i++) {
+        // Nodes are byte-aligned, so the name may not be aligned for a wchar_t.
+        const uint8_t *name = (const uint8_t *)node + EFI_SIZE_OF_FILEPATH_DEVICE_PATH;
+        size_t chars = (node_len - EFI_SIZE_OF_FILEPATH_DEVICE_PATH) / sizeof(wchar_t);
+        for (size_t i = 0; i < chars; i++) {
+            wchar_t c;
+            memcpy(&c, name + i * sizeof(c), sizeof(c));
+            if (c == L'\0') {
+                break;
+            }
             if (len + 1 >= SIZEOF_ARRAY(path)) {
                 return;
             }
-            path[len++] = name[i];
+            path[len++] = c;
         }
     }
 
@@ -304,7 +310,7 @@ void bli_on_boot(void) {
 // through to the sources a set one-shot variable is defined to override.
 static bool handle_timeout(wchar_t *variable, bool erase, uint64_t *timeout_ms, bool *skip_timeout) {
     wchar_t timeout_buf[256];
-    UINTN getvar_size = sizeof(timeout_buf) - 2;
+    EFI_UINTN getvar_size = sizeof(timeout_buf) - 2;
     uint32_t attrs;
 
     if (gRT->GetVariable(variable,
@@ -407,7 +413,7 @@ void bli_entries_publish(void) {
 
 static bool handle_entry(wchar_t *variable, bool erase, char *path, size_t buf_size) {
     wchar_t wide_path[256];
-    UINTN getvar_size = sizeof(wide_path) - 2;
+    EFI_UINTN getvar_size = sizeof(wide_path) - 2;
     uint32_t attrs;
     if (gRT->GetVariable(variable,
                              &bli_vendor_guid,
@@ -464,7 +470,7 @@ void bli_set_last_booted_entry(const char *id) {
     // This one survives the reboot it exists for, so it is worth not writing
     // when nothing changed: NVRAM has a limited number of erase cycles.
     wchar_t current[MENU_PATH_MAX];
-    UINTN current_size = sizeof(current);
+    EFI_UINTN current_size = sizeof(current);
     if (gRT->GetVariable(L"LoaderEntryLastBooted", &bli_vendor_guid, NULL,
                          &current_size, current) == 0
      && current_size == (len + 1) * sizeof(wchar_t)
@@ -481,7 +487,7 @@ void bli_set_last_booted_entry(const char *id) {
 }
 
 bool bli_smbios_pcr_recorded(void) {
-    UINTN size = 0;
+    EFI_UINTN size = 0;
     EFI_STATUS status = gRT->GetVariable(L"LoaderPcrSMBIOS", &bli_vendor_guid,
                                          NULL, &size, NULL);
 

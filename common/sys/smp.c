@@ -171,14 +171,23 @@ struct limine_mp_info *init_smp(size_t   *cpu_count,
     if (!lapic_check())
         return NULL;
 
+    // An x2APIC mode x2apic_check() rejects is reverted just as when the
+    // kernel does not support x2APIC, unless it cannot be: a kernel that
+    // supports it then keeps it.
+    bool x2apic_supported = x2apic;
+    x2apic = x2apic && x2apic_check();
+
     // PROTOCOL.md promises this revert whenever the MP request is present, so
     // it precedes the MADT search, which can return without it.
     if (rdmsr(0x1b) & (1 << 10)) {
         if (!x2apic) {
-            if (!x2apic_disable()) {
+            if (x2apic_disable()) {
+                printv("smp: Firmware had x2APIC enabled, reverted to xAPIC mode\n");
+            } else if (x2apic_supported) {
+                x2apic = true;
+            } else {
                 panic(false, "smp: Kernel does not support x2APIC and x2APIC cannot be disabled");
             }
-            printv("smp: Firmware had x2APIC enabled, reverted to xAPIC mode\n");
         }
     }
 
@@ -422,6 +431,10 @@ enum {
 // also the form ACPI table 5.36 gives the MADT's own field.
 #define MPIDR_AFFINITY_MASK ((uint64_t)0xff00ffffff)
 
+// Nothing past MPIDR is read, and GICC structures from before the fields
+// that follow it end there.
+#define GICC_USED_LENGTH (offsetof(struct madt_gicc, mpidr) + sizeof(uint64_t))
+
 static uint32_t psci_cpu_on = 0xC4000003;
 
 static bool try_start_ap(int boot_method, uint64_t method_ptr,
@@ -473,16 +486,32 @@ static bool try_start_ap(int boot_method, uint64_t method_ptr,
 
         case BOOT_WITH_PSCI_SMC:
         case BOOT_WITH_PSCI_HVC: {
-            register int32_t result asm("w0");
-            register uint32_t cmd asm("w0") = psci_cpu_on;
-            register uint64_t cpu asm("x1") = info_struct->mpidr;
-            register uint64_t addr asm("x2") = (uint64_t)(uintptr_t)trampoline;
-            register uint64_t ctx asm("x3") = 0;
+            register uint64_t x0 asm ("x0") = psci_cpu_on;
+            register uint64_t x1 asm ("x1") = info_struct->mpidr;
+            register uint64_t x2 asm ("x2") = (uint64_t)(uintptr_t)trampoline;
+            register uint64_t x3 asm ("x3") = 0;
 
-            if (boot_method == BOOT_WITH_PSCI_SMC)
-                asm volatile ("smc #0" : "=r"(result) : "r"(cmd), "r"(cpu), "r"(addr), "r"(ctx));
-            else
-                asm volatile ("hvc #0" : "=r"(result) : "r"(cmd), "r"(cpu), "r"(addr), "r"(ctx));
+            // SMCCC returns results in x0-x3, and version 1.0 leaves x4-x17
+            // unpredictable. Arm DEN0028.
+            if (boot_method == BOOT_WITH_PSCI_SMC) {
+                asm volatile (
+                    "smc #0"
+                    : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
+                    :
+                    : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
+                        "x13", "x14", "x15", "x16", "x17", "memory"
+                );
+            } else {
+                asm volatile (
+                    "hvc #0"
+                    : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
+                    :
+                    : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12",
+                        "x13", "x14", "x15", "x16", "x17", "memory"
+                );
+            }
+
+            int32_t result = (int32_t)x0;
 
             switch (result) {
                 case 0: // Success
@@ -595,8 +624,9 @@ static struct limine_mp_info *try_acpi_smp(size_t   *cpu_count,
         switch (*madt_ptr) {
             case 11: {
                 // GIC CPU Interface
-                if (*(madt_ptr + 1) < sizeof(struct madt_gicc))
+                if (*(madt_ptr + 1) < GICC_USED_LENGTH) {
                     continue;
+                }
 
                 struct madt_gicc *gicc = (void *)madt_ptr;
 
@@ -612,6 +642,10 @@ static struct limine_mp_info *try_acpi_smp(size_t   *cpu_count,
     struct limine_mp_info *ret = ext_mem_alloc_counted(max_cpus, sizeof(struct limine_mp_info));
     *cpu_count = 0;
 
+    if (boot_method == BOOT_WITH_ACPI_PARK) {
+        printv("smp: ACPI parking protocol is unsupported, starting no APs\n");
+    }
+
     // Try to start all APs
     for (uint8_t *madt_ptr = (uint8_t *)madt->madt_entries_begin;
       (uintptr_t)madt_ptr + 1 < (uintptr_t)madt + madt->header.length;
@@ -623,8 +657,9 @@ static struct limine_mp_info *try_acpi_smp(size_t   *cpu_count,
         switch (*madt_ptr) {
             case 11: {
                 // GIC CPU Interface
-                if (*(madt_ptr + 1) < sizeof(struct madt_gicc))
+                if (*(madt_ptr + 1) < GICC_USED_LENGTH) {
                     continue;
+                }
 
                 struct madt_gicc *gicc = (void *)madt_ptr;
 
@@ -642,6 +677,10 @@ static struct limine_mp_info *try_acpi_smp(size_t   *cpu_count,
                 // Do not try to restart the BSP
                 if (mpidr == bsp_mpidr) {
                     (*cpu_count)++;
+                    continue;
+                }
+
+                if (boot_method == BOOT_WITH_ACPI_PARK) {
                     continue;
                 }
 
@@ -699,9 +738,21 @@ static struct limine_mp_info *try_dtb_smp( void *dtb,
         return NULL;
     }
 
-    int psci = fdt_path_offset(dtb, "/psci");
+    // The PSCI binding fixes the node's compatible, not its path.
+    int psci = fdt_node_offset_by_compatible(dtb, -1, "arm,psci-1.0");
+    if (psci < 0) {
+        psci = fdt_node_offset_by_compatible(dtb, -1, "arm,psci-0.2");
+    }
+    if (psci < 0) {
+        psci = fdt_node_offset_by_compatible(dtb, -1, "arm,psci");
+    }
 
-    if (psci > 0 && !fdt_node_check_compatible(dtb, psci, "arm,psci")) {
+    // Per the PSCI binding, cpu_on is for PSCI 0.1 software alone, and is to be
+    // ignored where the node also lists a later version.
+    if (psci >= 0
+     && !fdt_node_check_compatible(dtb, psci, "arm,psci")
+     && fdt_node_check_compatible(dtb, psci, "arm,psci-0.2")
+     && fdt_node_check_compatible(dtb, psci, "arm,psci-1.0")) {
         int prop_len;
         const void *prop;
         if (!(prop = fdt_getprop(dtb, psci, "cpu_on", &prop_len)) || prop_len < 4) {
@@ -800,7 +851,7 @@ static struct limine_mp_info *try_dtb_smp( void *dtb,
 
         if (!strcmp(prop, "psci")) {
             if (psci < 0) {
-                printv("smp: failed to find /psci: %s\n", fdt_strerror(psci));
+                printv("smp: failed to find PSCI node: %s\n", fdt_strerror(psci));
                 continue;
             }
 

@@ -280,6 +280,10 @@ static const uint8_t builtin_font[] = {
 
 static struct image *background;
 
+// Kept for the rest of the menu session, whose rewind resets it, so that the
+// parameters handed to an executable reproduce the wallpaper the menu showed.
+static size_t wallpaper_index = (size_t)-1;
+
 static size_t margin = 64;
 static size_t margin_gradient = 4;
 
@@ -293,7 +297,7 @@ static uint32_t *bg_canvas;
 #define R(rgb) (uint8_t)(rgb >> 16)
 #define G(rgb) (uint8_t)(rgb >> 8)
 #define B(rgb) (uint8_t)(rgb)
-#define ARGB(a, r, g, b) (((a) << 24) | (((r) & 0xFF) << 16) | (((g) & 0xFF) << 8) | ((b) & 0xFF))
+#define ARGB(a, r, g, b) (((uint32_t)(a) << 24) | (((uint32_t)(r) & 0xFF) << 16) | (((uint32_t)(g) & 0xFF) << 8) | ((uint32_t)(b) & 0xFF))
 
 static inline uint32_t colour_blend(uint32_t fg, uint32_t bg) {
     unsigned alpha = 255 - A(fg);
@@ -347,7 +351,7 @@ static uint32_t blend_gradient_from_box(struct fb_info *fb, size_t x, size_t y, 
     uint8_t gradient_step = (0xff - A(hex)) / effective_margin_gradient;
     uint8_t new_alpha     = A(hex) + gradient_step * distance;
 
-    return colour_blend((hex & 0xffffff) | (new_alpha << 24), bg_px);
+    return colour_blend((hex & 0xffffff) | ((uint32_t)new_alpha << 24), bg_px);
 }
 
 // Draw rect at coordinates, copying from the image to the fb and canvas, applying fn on every pixel
@@ -364,6 +368,13 @@ __attribute__((always_inline)) static inline void genloop(struct fb_info *fb, si
         size_t tmp = ystart;
         ystart = yend;
         yend = tmp;
+    }
+
+    if (xstart >= xend
+     || ystart >= yend
+     || fb->framebuffer_width == 0
+     || fb->framebuffer_height == 0) {
+        return;
     }
 
     switch (background->type) {
@@ -442,6 +453,15 @@ static void loop_margin(struct fb_info *fb, size_t xstart, size_t xend, size_t y
 static void loop_internal(struct fb_info *fb, size_t xstart, size_t xend, size_t ystart, size_t yend) { genloop(fb, xstart, xend, ystart, yend, blend_internal); }
 
 static void generate_canvas(struct fb_info *fb) {
+    if (fb->framebuffer_width == 0 || fb->framebuffer_height == 0) {
+        if (bg_canvas != NULL) {
+            pmm_free(bg_canvas, bg_canvas_size);
+        }
+        bg_canvas = NULL;
+        bg_canvas_size = 0;
+        return;
+    }
+
     if (background) {
         // Free previous canvas if it exists
         if (bg_canvas != NULL) {
@@ -593,13 +613,16 @@ static void gterm_parse_config(char *config, struct gterm_config *cfg) {
 
     background = NULL;
     if (wallpaper_count > 0) {
-        char *background_path = config_get_value(config, rand32() % wallpaper_count, "WALLPAPER");
+        if (wallpaper_index >= wallpaper_count) {
+            wallpaper_index = rand32() % wallpaper_count;
+        }
+        char *background_path = config_get_value(config, wallpaper_index, "WALLPAPER");
         if (background_path != NULL) {
             if (secure_boot_active && strchr(background_path, '#') == NULL) {
                 print("Wallpaper skipped: Secure Boot is active and no hash is associated.\n");
             } else {
                 struct file_handle *bg_file;
-                if ((bg_file = uri_open(background_path, MEMMAP_BOOTLOADER_RECLAIMABLE,
+                if ((bg_file = uri_open_optional(background_path, MEMMAP_BOOTLOADER_RECLAIMABLE,
 #if defined (__i386__)
                     false, NULL, NULL
 #else
@@ -656,7 +679,7 @@ static void gterm_parse_config(char *config, struct gterm_config *cfg) {
         }
 
         if (tmp_font_width != 8) {
-            print("Font width must be 8, got %u. Using default font.\n", tmp_font_width);
+            print("Font width must be 8, got %U. Using default font.\n", (uint64_t)tmp_font_width);
             goto config_no_load_font;
         }
 
@@ -680,7 +703,7 @@ static void gterm_parse_config(char *config, struct gterm_config *cfg) {
             goto config_no_load_font;
         }
         struct file_handle *f;
-        if ((f = uri_open(menu_font, MEMMAP_BOOTLOADER_RECLAIMABLE,
+        if ((f = uri_open_optional(menu_font, MEMMAP_BOOTLOADER_RECLAIMABLE,
 #if defined (__i386__)
             false, NULL, NULL
 #else
@@ -837,7 +860,10 @@ bool gterm_init(struct fb_info **_fbs, size_t *_fbs_count,
     for (size_t i = 0; i < fbs_count; i++) {
         struct fb_info *fb = &fbs[i];
 
-        if (fb->framebuffer_bpp != 32) {
+        if (fb->framebuffer_bpp != 32
+         || fb->framebuffer_width == 0
+         || fb->framebuffer_height == 0
+         || fb->framebuffer_addr == 0) {
             continue;
         }
 
@@ -938,7 +964,10 @@ size_t gterm_prepare_flanterm_params(struct fb_info *fbs, size_t fbs_count,
     for (size_t i = 0; i < fbs_count && count < out_max; i++) {
         struct fb_info *fb = &fbs[i];
 
-        if (fb->framebuffer_bpp != 32) {
+        if (fb->framebuffer_bpp != 32
+         || fb->framebuffer_width == 0
+         || fb->framebuffer_height == 0
+         || fb->framebuffer_addr == 0) {
             continue;
         }
 

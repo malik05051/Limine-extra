@@ -47,7 +47,7 @@ bool fs_readdir(struct volume *part, const char *path,
 #define FS_RENAME_NAME_MAX 256
 
 // The firmware wants a backslash-separated path in UTF-16.
-static bool fs_to_efi_path(CHAR16 *out, size_t out_size, const char *path) {
+static bool fs_to_efi_path(EFI_CHAR16 *out, size_t out_size, const char *path) {
     size_t pos = 0;
 
     if (path[0] != '/') {
@@ -64,7 +64,7 @@ static bool fs_to_efi_path(CHAR16 *out, size_t out_size, const char *path) {
         if ((unsigned char)*path > 0x7f) {
             return false;
         }
-        out[pos++] = *path == '/' ? L'\\' : (CHAR16)*path;
+        out[pos++] = *path == '/' ? L'\\' : (EFI_CHAR16)*path;
     }
 
     out[pos] = L'\0';
@@ -81,7 +81,7 @@ bool fs_rename(struct volume *part, const char *path, const char *new_name) {
         return false;
     }
 
-    CHAR16 wide_path[512];
+    EFI_CHAR16 wide_path[512];
     if (!fs_to_efi_path(wide_path, SIZEOF_ARRAY(wide_path), path)) {
         return false;
     }
@@ -92,12 +92,12 @@ bool fs_rename(struct volume *part, const char *path, const char *new_name) {
         return false;
     }
 
-    EFI_FILE_HANDLE root = NULL;
+    EFI_FILE_PROTOCOL *root = NULL;
     if (fs->OpenVolume(fs, &root) != EFI_SUCCESS) {
         return false;
     }
 
-    EFI_FILE_HANDLE file = NULL;
+    EFI_FILE_PROTOCOL *file = NULL;
     EFI_STATUS status = root->Open(root, &file, wide_path,
                                    EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
     root->Close(root);
@@ -109,10 +109,10 @@ bool fs_rename(struct volume *part, const char *path, const char *new_name) {
     // SetInfo takes a whole EFI_FILE_INFO back, so the existing one is read
     // first and only its name replaced.
     EFI_GUID info_guid = EFI_FILE_INFO_ID;
-    size_t info_size = SIZE_OF_EFI_FILE_INFO + FS_RENAME_NAME_MAX * sizeof(CHAR16);
+    size_t info_size = EFI_SIZE_OF_EFI_FILE_INFO + FS_RENAME_NAME_MAX * sizeof(EFI_CHAR16);
     EFI_FILE_INFO *info = ext_mem_alloc(info_size);
 
-    UINTN size = info_size;
+    EFI_UINTN size = info_size;
     bool ok = false;
 
     if (file->GetInfo(file, &info_guid, &size, info) == EFI_SUCCESS) {
@@ -124,7 +124,7 @@ bool fs_rename(struct volume *part, const char *path, const char *new_name) {
         }
         info->FileName[name_len] = L'\0';
 
-        size = SIZE_OF_EFI_FILE_INFO + (name_len + 1) * sizeof(CHAR16);
+        size = EFI_SIZE_OF_EFI_FILE_INFO + (name_len + 1) * sizeof(EFI_CHAR16);
         info->Size = size;
 
         ok = file->SetInfo(file, &info_guid, size, info) == EFI_SUCCESS;

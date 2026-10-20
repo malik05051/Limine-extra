@@ -14,7 +14,9 @@
 #include <lib/print.h>
 #include <lib/libc.h>
 #include <sys/idt.h>
+#include <sys/cpu.h>
 #include <lib/bli.h>
+#include <lib/utf.h>
 #include <drivers/vga_textmode.h>
 #include <mm/pmm.h>
 #if defined (UEFI)
@@ -24,7 +26,7 @@
 #if defined (BIOS)
 
 __attribute__((noinline, section(".realmode")))
-noreturn static void spinup(uint8_t drive, void *buf) {
+noreturn static void spinup(uint8_t drive, void *buf, uint16_t part_entry) {
     struct idtr real_mode_idt;
     real_mode_idt.limit = 0x3ff;
     real_mode_idt.ptr   = 0;
@@ -40,6 +42,9 @@ noreturn static void spinup(uint8_t drive, void *buf) {
         "mov $0x7c00, %%edi\n\t"
         "mov $512, %%ecx\n\t"
         "rep movsb\n\t"
+
+        // The boot record's DS:SI, DS being zeroed below
+        "mov %%ebx, %%esi\n\t"
 
         "lidt (%%eax)\n\t"
 
@@ -76,7 +81,7 @@ noreturn static void spinup(uint8_t drive, void *buf) {
 
         ".code32\n\t"
         :
-        : "a" (&real_mode_idt), "d" (drive), "S"(buf)
+        : "a" (&real_mode_idt), "d" (drive), "S"(buf), "b" ((uint32_t)part_entry)
         : "memory"
     );
 
@@ -92,6 +97,108 @@ noreturn void spinup_freebsd(uint32_t drive, uint32_t buf, uint32_t count);
 #define FREEBSD_BOOT_TYPE_GUID "83bd6b9d-7f41-11dc-be0b-001560b84f0f"
 #define FREEBSD_BOOT_LOAD_ADDR 0x7c00
 #define FREEBSD_BOOT_LOAD_TOP 0x90000
+
+// MBR boot code relocates itself to 0x600 before loading a boot record, which
+// leaves its partition table at 0x7BE.
+#define MBR_TABLE_ADDR 0x7be
+
+// Finds a logical partition's EBR entry by its extent and makes the entry's
+// start absolute like an MBR entry's. A link may point backwards, as the one
+// to a partition made in a gap before the others does, so only a repeated EBR
+// marks a loop.
+static bool logical_part_entry(struct volume *p, struct mbr_entry *entry) {
+    struct volume *extended = p->backing_dev->ebr_part;
+    uint64_t mult = (uint64_t)p->sector_size / 512;
+    uint64_t visited[256];
+    uint64_t ebr_sector = 0;
+
+    for (size_t link = 0; link < SIZEOF_ARRAY(visited); link++) {
+        uint16_t signature;
+        struct mbr_entry table[4];
+
+        visited[link] = ebr_sector;
+
+        if (!volume_read(extended, &signature, ebr_sector * 512 + 0x1fe, sizeof(signature))
+         || signature != 0xaa55
+         || !volume_read(extended, table, ebr_sector * 512 + 0x1be, sizeof(table))) {
+            return false;
+        }
+
+        bool have_next = false;
+        uint64_t next = 0;
+
+        for (int i = 0; i < 4; i++) {
+            if (table[i].sect_count == 0) {
+                continue;
+            }
+
+            if (table[i].type == 0x05 || table[i].type == 0x0f || table[i].type == 0x85) {
+                if (!have_next) {
+                    have_next = true;
+                    next = table[i].first_sect * mult;
+                }
+                continue;
+            }
+
+            uint64_t first_sect = extended->first_sect + ebr_sector + table[i].first_sect * mult;
+            if (first_sect != p->first_sect || table[i].sect_count * mult != p->sect_count) {
+                continue;
+            }
+
+            if (first_sect / mult > UINT32_MAX) {
+                return false;
+            }
+
+            *entry = table[i];
+            entry->first_sect = first_sect / mult;
+            return true;
+        }
+
+        if (!have_next) {
+            return false;
+        }
+
+        for (size_t i = 0; i <= link; i++) {
+            if (visited[i] == next) {
+                return false;
+            }
+        }
+
+        ebr_sector = next;
+    }
+
+    return false;
+}
+
+// Returns the segment 0 offset of the entry for DS:SI to point at, 0 if none.
+static uint16_t place_part_entry(struct volume *p) {
+    struct mbr_entry table[4] = {0};
+    int slot = 0;
+
+    if (p->partition == 0 || p->part_guid_valid) {
+        return 0;
+    }
+
+    if (p->partition <= 4) {
+        if (!volume_read(p->backing_dev, table, 0x1be, sizeof(table))) {
+            return 0;
+        }
+        slot = p->partition - 1;
+    } else if (!logical_part_entry(p, &table[0])) {
+        return 0;
+    }
+
+    // MBR code only loads the boot record of the active partition.
+    for (int i = 0; i < 4; i++) {
+        table[i].status = i == slot ? 0x80 : 0x00;
+    }
+
+    for (size_t i = 0; i < sizeof(table); i++) {
+        mmoutb(MBR_TABLE_ADDR + i, ((uint8_t *)table)[i]);
+    }
+
+    return MBR_TABLE_ADDR + sizeof(struct mbr_entry) * slot;
+}
 
 noreturn void chainload(char *config, char *cmdline) {
     (void)cmdline;
@@ -136,13 +243,13 @@ noreturn void chainload(char *config, char *cmdline) {
     }
     if (gpt_guid_s != NULL) {
         struct guid guid;
-        if (!string_to_guid_be(&guid, gpt_guid_s)) {
+        if (!string_to_guid_mixed(&guid, gpt_guid_s)) {
             panic(true, "bios: Malformed GUID");
         }
 
         p = volume_get_by_guid(&guid);
         if (p == NULL) {
-            if (!string_to_guid_mixed(&guid, gpt_guid_s)) {
+            if (!string_to_guid_be(&guid, gpt_guid_s)) {
                 panic(true, "bios: Malformed GUID");
             }
 
@@ -237,7 +344,9 @@ load:
         panic(true, "bios: Volume is not bootable");
     }
 
-    spinup(p->drive, buf);
+    uint16_t part_entry = place_part_entry(p);
+
+    spinup(p->drive, buf, part_entry);
 }
 
 #elif defined (UEFI)
@@ -251,22 +360,26 @@ static EFI_DEVICE_PATH_PROTOCOL *build_relative_efi_file_path(struct file_handle
 
     size_t original_path_chars = strlen(image->path);
 
-    size_t efi_file_path_alloc_len = (original_path_chars + 1) * sizeof(CHAR16);
-    CHAR16 *efi_file_path = ext_mem_alloc(efi_file_path_alloc_len);
+    // UTF-16 never takes more code units than UTF-8 takes bytes.
+    size_t efi_file_path_alloc_len = (original_path_chars + 1) * sizeof(EFI_CHAR16);
+    EFI_CHAR16 *efi_file_path = ext_mem_alloc(efi_file_path_alloc_len);
+
+    size_t efi_file_path_chars;
+    utf8_to_utf16(efi_file_path, original_path_chars + 1, image->path, original_path_chars, &efi_file_path_chars);
 
     bool leading_slash = true;
     size_t j = 0;
-    for (size_t i = 0; i < original_path_chars; i++) {
-        if (image->path[i] == '/' && leading_slash) {
+    for (size_t i = 0; i < efi_file_path_chars; i++) {
+        if (efi_file_path[i] == '/' && leading_slash) {
             continue;
         }
         leading_slash = false;
-        efi_file_path[j++] = image->path[i] == '/' ? '\\' : image->path[i];
+        efi_file_path[j++] = efi_file_path[i] == '/' ? '\\' : efi_file_path[i];
     }
     efi_file_path[j] = 0;
 
 
-    size_t efi_file_path_len = ((j + 1) * sizeof(CHAR16));
+    size_t efi_file_path_len = ((j + 1) * sizeof(EFI_CHAR16));
     size_t path_item_len     = sizeof(EFI_DEVICE_PATH_PROTOCOL) + efi_file_path_len;
     size_t end_item_len      = sizeof(EFI_DEVICE_PATH_PROTOCOL);
     size_t alloc_len         = path_item_len + end_item_len;
@@ -278,19 +391,19 @@ static EFI_DEVICE_PATH_PROTOCOL *build_relative_efi_file_path(struct file_handle
     EFI_DEVICE_PATH_PROTOCOL *device_path;
     EFI_STATUS status = gBS->AllocatePool(EfiLoaderData, alloc_len, (void **)&device_path);
     if (status) {
-        panic(true, "efi: AllocatePool() failure (%x)", status);
+        panic(true, "efi: AllocatePool() failure (%X)", (uint64_t)status);
     }
 
-    FILEPATH_DEVICE_PATH *path_item = (FILEPATH_DEVICE_PATH *)device_path;
-    path_item->Header.Type      = MEDIA_DEVICE_PATH;
-    path_item->Header.SubType   = MEDIA_FILEPATH_DP;
+    EFI_FILEPATH_DEVICE_PATH *path_item = (EFI_FILEPATH_DEVICE_PATH *)device_path;
+    path_item->Header.Type = EFI_MEDIA_DEVICE_PATH;
+    path_item->Header.SubType = EFI_MEDIA_FILEPATH_DP;
     path_item->Header.Length[0] = path_item_len;
     path_item->Header.Length[1] = path_item_len >> 8;
     memcpy(&path_item->PathName, efi_file_path, efi_file_path_len);
 
     EFI_DEVICE_PATH_PROTOCOL *end_item = (void *)device_path + path_item_len;
-    end_item->Type      = END_DEVICE_PATH_TYPE;
-    end_item->SubType   = END_ENTIRE_DEVICE_PATH_SUBTYPE;
+    end_item->Type = EFI_END_DEVICE_PATH_TYPE;
+    end_item->SubType = EFI_END_ENTIRE_DEVICE_PATH_SUBTYPE;
     end_item->Length[0] = end_item_len;
     end_item->Length[1] = end_item_len >> 8;
 
@@ -351,39 +464,48 @@ noreturn void chainload(char *config, char *cmdline) {
             !fb_flush_reliable(), false);
 
     size_t cmdline_len = strlen(cmdline);
-    CHAR16 *new_cmdline = NULL;
+    EFI_CHAR16 *new_cmdline = NULL;
+    size_t new_cmdline_size = 0;
     if (cmdline_len > 0) {
-        status = gBS->AllocatePool(EfiLoaderData, CHECKED_MUL(cmdline_len + 1, sizeof(CHAR16), panic(true, "efi: Allocation size overflow")), (void **)&new_cmdline);
+        // UTF-16 never takes more code units than UTF-8 takes bytes.
+        size_t cmdline_utf16_alloc_len = CHECKED_MUL(cmdline_len + 1, sizeof(EFI_CHAR16), panic(true, "efi: Allocation size overflow"));
+        EFI_CHAR16 *cmdline_utf16 = ext_mem_alloc(cmdline_utf16_alloc_len);
+
+        size_t cmdline_utf16_chars;
+        utf8_to_utf16(cmdline_utf16, cmdline_len + 1, cmdline, cmdline_len, &cmdline_utf16_chars);
+
+        new_cmdline_size = (cmdline_utf16_chars + 1) * sizeof(EFI_CHAR16);
+        status = gBS->AllocatePool(EfiLoaderData, new_cmdline_size, (void **)&new_cmdline);
         if (status) {
             panic(true, "efi: Allocation failure");
         }
-        for (size_t i = 0; i < cmdline_len + 1; i++) {
-            new_cmdline[i] = cmdline[i];
-        }
+        memcpy(new_cmdline, cmdline_utf16, new_cmdline_size);
+
+        pmm_free(cmdline_utf16, cmdline_utf16_alloc_len);
     }
 
     pmm_release_uefi_mem();
 
-    MEMMAP_DEVICE_PATH memdev_path[2];
+    EFI_MEMMAP_DEVICE_PATH memdev_path[2];
 
-    memdev_path[0].Header.Type      = HARDWARE_DEVICE_PATH;
-    memdev_path[0].Header.SubType   = HW_MEMMAP_DP;
-    memdev_path[0].Header.Length[0] = sizeof(MEMMAP_DEVICE_PATH);
-    memdev_path[0].Header.Length[1] = sizeof(MEMMAP_DEVICE_PATH) >> 8;
+    memdev_path[0].Header.Type = EFI_HARDWARE_DEVICE_PATH;
+    memdev_path[0].Header.SubType = EFI_HW_MEMMAP_DP;
+    memdev_path[0].Header.Length[0] = sizeof(EFI_MEMMAP_DEVICE_PATH);
+    memdev_path[0].Header.Length[1] = sizeof(EFI_MEMMAP_DEVICE_PATH) >> 8;
 
     memdev_path[0].MemoryType       = EfiLoaderCode;
     memdev_path[0].StartingAddress  = (uintptr_t)ptr;
     memdev_path[0].EndingAddress    = (uintptr_t)ptr + image_size;
 
-    memdev_path[1].Header.Type      = END_DEVICE_PATH_TYPE;
-    memdev_path[1].Header.SubType   = END_ENTIRE_DEVICE_PATH_SUBTYPE;
-    memdev_path[1].Header.Length[0] = sizeof(EFI_DEVICE_PATH);
-    memdev_path[1].Header.Length[1] = sizeof(EFI_DEVICE_PATH) >> 8;
+    memdev_path[1].Header.Type = EFI_END_DEVICE_PATH_TYPE;
+    memdev_path[1].Header.SubType = EFI_END_ENTIRE_DEVICE_PATH_SUBTYPE;
+    memdev_path[1].Header.Length[0] = sizeof(EFI_DEVICE_PATH_PROTOCOL);
+    memdev_path[1].Header.Length[1] = sizeof(EFI_DEVICE_PATH_PROTOCOL) >> 8;
 
     EFI_HANDLE new_handle = 0;
 
     status = gBS->LoadImage(0, efi_image_handle,
-                            (EFI_DEVICE_PATH *)memdev_path,
+                            (EFI_DEVICE_PATH_PROTOCOL *)memdev_path,
                             ptr, image_size, &new_handle);
     if (status) {
         panic(false, "efi: LoadImage failure (%X)", (uint64_t)status);
@@ -405,7 +527,7 @@ noreturn void chainload(char *config, char *cmdline) {
     new_handle_loaded_image->FilePath = efi_file_path;
 
     if (cmdline_len > 0) {
-        new_handle_loaded_image->LoadOptionsSize = (cmdline_len + 1) * sizeof(CHAR16);
+        new_handle_loaded_image->LoadOptionsSize = new_cmdline_size;
         new_handle_loaded_image->LoadOptions = new_cmdline;
     } else {
         new_handle_loaded_image->LoadOptionsSize = 0;
@@ -414,8 +536,8 @@ noreturn void chainload(char *config, char *cmdline) {
 
     bli_on_boot();
 
-    UINTN exit_data_size = 0;
-    CHAR16 *exit_data = NULL;
+    EFI_UINTN exit_data_size = 0;
+    EFI_CHAR16 *exit_data = NULL;
     EFI_STATUS exit_status = gBS->StartImage(new_handle, &exit_data_size, &exit_data);
 
     status = gBS->Exit(efi_image_handle, exit_status, exit_data_size, exit_data);

@@ -189,7 +189,11 @@ static void pe64_validate(uint8_t *image, size_t file_size) {
         panic(true, "pe: Not a valid PE32+ file");
     }
 
-    if (nt_hdrs->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64)) {
+    // Directories past the ones the header structure holds go unused.
+    size_t directory_count = MIN(nt_hdrs->OptionalHeader.NumberOfRvaAndSizes, SIZEOF_ARRAY(nt_hdrs->OptionalHeader.DataDirectory));
+    size_t directories_size = directory_count * sizeof(IMAGE_DATA_DIRECTORY);
+
+    if (nt_hdrs->FileHeader.SizeOfOptionalHeader < offsetof(IMAGE_OPTIONAL_HEADER64, DataDirectory) + directories_size) {
         panic(true, "pe: SizeOfOptionalHeader too small");
     }
 
@@ -275,6 +279,24 @@ static void reloc_store(void *p, uint64_t v, size_t size) {
     for (size_t i = 0; i < size; i++) {
         d[i] = (uint8_t)(v >> (i * 8));
     }
+}
+
+// Only object files are meant to have a zero VirtualSize, so an image section
+// with one is taken to span its raw data.
+static uint32_t pe_section_virtual_size(IMAGE_SECTION_HEADER *section) {
+    if (section->VirtualSize == 0) {
+        return section->SizeOfRawData;
+    }
+
+    return section->VirtualSize;
+}
+
+static IMAGE_DATA_DIRECTORY *pe64_data_directory(IMAGE_NT_HEADERS64 *nt_hdrs, size_t index) {
+    if (index >= nt_hdrs->OptionalHeader.NumberOfRvaAndSizes) {
+        return NULL;
+    }
+
+    return &nt_hdrs->OptionalHeader.DataDirectory[index];
 }
 
 bool pe64_load(uint8_t *image, size_t file_size, uint64_t *entry_point, uint64_t *_slide, uint32_t alloc_type, bool kaslr, struct mem_range **_ranges, uint64_t *_ranges_count, uint64_t *physical_base, uint64_t *virtual_base, uint64_t *_image_size, uint64_t *image_size_before_bss, bool *_is_reloc) {
@@ -379,16 +401,17 @@ again:
         IMAGE_SECTION_HEADER *section = &sections[i];
 
         uintptr_t section_base = *physical_base + section->VirtualAddress;
-        uint32_t section_raw_size = section->VirtualSize < section->SizeOfRawData ? section->VirtualSize : section->SizeOfRawData;
+        uint32_t section_size = pe_section_virtual_size(section);
+        uint32_t section_raw_size = section_size < section->SizeOfRawData ? section_size : section->SizeOfRawData;
 
         // Validate section doesn't write past the image buffer
         if ((uint64_t)section->VirtualAddress + section_raw_size > image_size) {
             panic(true, "pe: Section %U exceeds image bounds", (uint64_t)i);
         }
 
-        // The full VirtualSize (not just the raw size copied above) is mapped
+        // The full virtual size (not just the raw size copied above) is mapped
         // by the mem_range pass, so the whole virtual extent must fit too.
-        if ((uint64_t)section->VirtualAddress + section->VirtualSize > image_size) {
+        if ((uint64_t)section->VirtualAddress + section_size > image_size) {
             panic(true, "pe: Section %U virtual size exceeds image bounds", (uint64_t)i);
         }
 
@@ -398,7 +421,7 @@ again:
             panic(true, "pe: Section %U overlaps or is out of order", (uint64_t)i);
         }
 
-        prev_section_top = (uint64_t)section->VirtualAddress + section->VirtualSize;
+        prev_section_top = (uint64_t)section->VirtualAddress + section_size;
 
         if (section->VirtualAddress % alignment != 0) {
             panic(true, "pe: Section %U is not aligned to SectionAlignment", (uint64_t)i);
@@ -423,14 +446,10 @@ again:
         }
     }
 
-    if (nt_hdrs->OptionalHeader.NumberOfRvaAndSizes < IMAGE_DIRECTORY_ENTRY_BASERELOC + 1) {
-        panic(true, "pe: NumberOfRvaAndSizes too small for import/reloc directories");
-    }
+    IMAGE_DATA_DIRECTORY *import_dir = pe64_data_directory(nt_hdrs, IMAGE_DIRECTORY_ENTRY_IMPORT);
+    IMAGE_DATA_DIRECTORY *reloc_dir = pe64_data_directory(nt_hdrs, IMAGE_DIRECTORY_ENTRY_BASERELOC);
 
-    IMAGE_DATA_DIRECTORY *import_dir = &nt_hdrs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
-    IMAGE_DATA_DIRECTORY *reloc_dir = &nt_hdrs->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
-
-    if (import_dir->Size != 0) {
+    if (import_dir != NULL && import_dir->Size != 0) {
         if (import_dir->VirtualAddress >= image_size ||
             sizeof(IMAGE_IMPORT_DESCRIPTOR) > image_size - import_dir->VirtualAddress) {
             panic(true, "pe: Import directory VirtualAddress out of bounds");
@@ -447,7 +466,7 @@ again:
         }
     }
 
-    if (reloc_dir->VirtualAddress != 0) {
+    if (reloc_dir != NULL && reloc_dir->VirtualAddress != 0) {
         if (reloc_dir->VirtualAddress >= image_size ||
             reloc_dir->Size > image_size - reloc_dir->VirtualAddress) {
             panic(true, "pe: Relocation directory VirtualAddress out of bounds");
@@ -582,7 +601,7 @@ again:
             range->base = *virtual_base + section->VirtualAddress;
             // ALIGN_UP accumulates in its first argument's type, so the cast
             // is what keeps a section rounding up past 4 GiB from truncating.
-            range->length = ALIGN_UP((uint64_t)section->VirtualSize, alignment, panic(true, "pe: Alignment overflow"));
+            range->length = ALIGN_UP((uint64_t)pe_section_virtual_size(section), alignment, panic(true, "pe: Alignment overflow"));
 
             if (range->length > image_top - range->base) {
                 range->length = image_top - range->base;

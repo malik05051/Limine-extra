@@ -8,11 +8,22 @@
 #include <fs/file.h>
 #include <mm/pmm.h>
 #include <lib/print.h>
+#include <lib/term.h>
 #include <pxe/tftp.h>
 #include <menu.h>
 #include <lib/getchar.h>
 #include <crypt/blake2b.h>
 #include <compress/gzip.h>
+
+static bool optional_resource = false;
+
+// Only returns for an optional resource, which the caller then backs out of.
+#define URI_ERROR(FMT, ...) do { \
+    if (!optional_resource) { \
+        panic(true, FMT, ##__VA_ARGS__); \
+    } \
+    print(FMT "\n", ##__VA_ARGS__); \
+} while (0)
 
 // A URI takes the form of: resource(root):/path#hash
 // The following function splits up a URI into its components.
@@ -24,7 +35,8 @@ bool uri_resolve(char *uri, char **resource, char **root, char **path, char **ha
 
     size_t length = strlen(uri) + 1;
     if (length > URI_BUF_SIZE) {
-        panic(true, "uri_resolve: URI too long (max %u)", URI_BUF_SIZE - 1);
+        URI_ERROR("uri_resolve: URI too long (max %u)", URI_BUF_SIZE - 1);
+        return false;
     }
     memcpy(buf, uri, length);
     uri = buf;
@@ -75,7 +87,7 @@ bool uri_resolve(char *uri, char **resource, char **root, char **path, char **ha
         }
 
         if (strlen(uri + i) != 128) {
-            panic(true, "Blake2b hash must be 128 characters long");
+            URI_ERROR("Blake2b hash must be 128 characters long");
             return false;
         }
 
@@ -83,7 +95,7 @@ bool uri_resolve(char *uri, char **resource, char **root, char **path, char **ha
         for (size_t j = 0; j < 128; j++) {
             char c = uri[i + j];
             if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
-                panic(true, "Blake2b hash contains invalid character at position %d", (int)j);
+                URI_ERROR("Blake2b hash contains invalid character at position %d", (int)j);
                 return false;
             }
         }
@@ -104,11 +116,13 @@ static bool parse_bios_partition(char *loc, int *drive, int *partition) {
         if (loc[i] == ':') {
             loc[i] = 0;
             if (*loc == 0) {
-                panic(true, "Drive number cannot be omitted for hdd():/ and odd():/");
+                URI_ERROR("Drive number cannot be omitted for hdd():/ and odd():/");
+                return false;
             } else {
                 val = strtoui(loc, NULL, 10);
                 if (val < 1 || val > 256) {
-                    panic(true, "Drive number outside range 1-256");
+                    URI_ERROR("Drive number outside range 1-256");
+                    return false;
                 }
                 *drive = val;
             }
@@ -119,7 +133,8 @@ static bool parse_bios_partition(char *loc, int *drive, int *partition) {
 
     val = strtoui(loc, NULL, 10);
     if (val > 256) {
-        panic(true, "Partition number outside range 0-256");
+        URI_ERROR("Partition number outside range 0-256");
+        return false;
     }
     *partition = val;
 
@@ -156,13 +171,15 @@ static struct file_handle *uri_odd_dispatch(char *loc, char *path) {
 
 static struct file_handle *uri_guid_dispatch(char *guid_str, char *path) {
     struct guid guid;
-    if (!string_to_guid_be(&guid, guid_str))
+    if (!string_to_guid_mixed(&guid, guid_str)) {
         return NULL;
+    }
 
     struct volume *volume = volume_get_by_guid(&guid);
     if (volume == NULL) {
-        if (!string_to_guid_mixed(&guid, guid_str))
+        if (!string_to_guid_be(&guid, guid_str)) {
             return NULL;
+        }
 
         volume = volume_get_by_guid(&guid);
         if (volume == NULL)
@@ -187,7 +204,8 @@ static struct file_handle *uri_tftp_dispatch(char *root, char *path) {
         ip = 0;
     } else {
         if (inet_pton(root, &ip)) {
-            panic(true, "tftp: Invalid ipv4 address: %s", root);
+            URI_ERROR("tftp: Invalid ipv4 address: %s", root);
+            return NULL;
         }
     }
 
@@ -208,7 +226,8 @@ static struct file_handle *uri_boot_dispatch(char *s_part, char *path) {
     if (s_part[0] != '\0') {
         uint64_t val = strtoui(s_part, NULL, 10);
         if (val > 256) {
-            panic(true, "Partition number outside range 0-256");
+            URI_ERROR("Partition number outside range 0-256");
+            return NULL;
         }
         partition = val;
     } else {
@@ -278,9 +297,11 @@ static void uri_high_close(struct file_handle *fh) {
 }
 #endif
 
-static void uri_hash_mismatch(const char *uri) {
-    if (hash_mismatch_panic) {
-        panic(true, "Blake2b hash for URI `%#` does not match!", uri);
+// Returns whether to use the resource anyway.
+static bool uri_hash_mismatch(const char *uri) {
+    if (hash_mismatch_panic || optional_resource) {
+        URI_ERROR("Blake2b hash for URI `%#` does not match!", uri);
+        return false;
     }
 
     print("WARNING: Blake2b hash for URI `%#` does not match!\n"
@@ -288,9 +309,12 @@ static void uri_hash_mismatch(const char *uri) {
 
     char ch = getchar();
     if (ch != 'Y' && ch != 'y') {
+        // menu()'s rewind forgets the framebuffer setup without undoing it.
+        term_notready();
         menu(false);
     }
     print("\n");
+    return true;
 }
 
 struct file_handle *uri_open(char *uri, uint32_t type, bool allow_high_mem
@@ -313,7 +337,8 @@ struct file_handle *uri_open(char *uri, uint32_t type, bool allow_high_mem
     }
 
     if (resource == NULL) {
-        panic(true, "No resource specified for URI `%#`.", uri);
+        URI_ERROR("No resource specified for URI `%#`.", uri);
+        return NULL;
     }
 
     bool gz_compressed = *resource == '$';
@@ -336,7 +361,8 @@ struct file_handle *uri_open(char *uri, uint32_t type, bool allow_high_mem
     } else if (!strcmp(resource, "tftp")) {
         raw = uri_tftp_dispatch(root, path);
     } else {
-        panic(true, "Resource `%s` not valid.", resource);
+        URI_ERROR("Resource `%s` not valid.", resource);
+        return NULL;
     }
 
     if (raw == NULL) {
@@ -344,7 +370,9 @@ struct file_handle *uri_open(char *uri, uint32_t type, bool allow_high_mem
     }
 
     if (secure_boot_active && hash == NULL) {
-        panic(true, "Secure Boot is active and URI `%#` has no associated hash!", uri);
+        URI_ERROR("Secure Boot is active and URI `%#` has no associated hash!", uri);
+        fclose(raw);
+        return NULL;
     }
 
     uint8_t hash_buf[BLAKE2B_OUT_BYTES];
@@ -380,7 +408,10 @@ struct file_handle *uri_open(char *uri, uint32_t type, bool allow_high_mem
         // blake2b() takes a size_t, which is 32 bits on ia32.
         size_t compressed_size = raw->size;
         if (compressed_size != raw->size) {
-            panic(true, "Resource `%#` is too large to hash", uri);
+            URI_ERROR("Resource `%#` is too large to hash", uri);
+            fclose(raw);
+            pmm_free(raw_path_copy, raw_path_len);
+            return NULL;
         }
 
         // Site it where the caller would have let the payload go, rather than
@@ -408,8 +439,11 @@ struct file_handle *uri_open(char *uri, uint32_t type, bool allow_high_mem
 
             pmm_free(pool, 0x100000);
 
-            if (!blake2b_check_hash(hashed, hash_buf)) {
-                uri_hash_mismatch(uri);
+            if (!blake2b_check_hash(hashed, hash_buf) && !uri_hash_mismatch(uri)) {
+                fclose(hashed);
+                uri_release_range(compressed_addr, compressed_size);
+                pmm_free(raw_path_copy, raw_path_len);
+                return NULL;
             }
             fclose(hashed);
 
@@ -419,8 +453,8 @@ struct file_handle *uri_open(char *uri, uint32_t type, bool allow_high_mem
 
             top = ext_mem_alloc(sizeof(struct file_handle));
             top->fd = src;
-            top->read = (void *)uri_high_read;
-            top->close = (void *)uri_high_close;
+            top->read = uri_high_read;
+            top->close = uri_high_close;
             top->size = compressed_size;
         } else
 #endif
@@ -432,8 +466,11 @@ struct file_handle *uri_open(char *uri, uint32_t type, bool allow_high_mem
 
             uint8_t digest[BLAKE2B_OUT_BYTES];
             blake2b(digest, compressed_low, compressed_size);
-            if (memcmp(digest, hash_buf, BLAKE2B_OUT_BYTES) != 0) {
-                uri_hash_mismatch(uri);
+            if (memcmp(digest, hash_buf, BLAKE2B_OUT_BYTES) != 0
+             && !uri_hash_mismatch(uri)) {
+                uri_release_range(compressed_addr, compressed_size);
+                pmm_free(raw_path_copy, raw_path_len);
+                return NULL;
             }
 
             // A carrier for the decoder; the metadata the caller gets back was
@@ -623,8 +660,12 @@ grew:;
     }
 
     // Finalise the hash check now that every byte has flowed through the filter.
-    if (hash_fh != NULL && !blake2b_check_hash(hash_fh, hash_buf)) {
-        uri_hash_mismatch(uri);
+    if (hash_fh != NULL && !blake2b_check_hash(hash_fh, hash_buf)
+     && !uri_hash_mismatch(uri)) {
+        fclose(top);
+        uri_release_range(buf_addr, buf_len);
+        pmm_free(raw_path_copy, raw_path_len);
+        return NULL;
     }
 
     // Close the filter chain. fclose cascades.
@@ -650,6 +691,22 @@ grew:;
     out->pxe_port = raw_pxe_port;
 
     return out;
+}
+
+struct file_handle *uri_open_optional(char *uri, uint32_t type, bool allow_high_mem
+#if defined (__i386__)
+    , void (*memcpy_to_64)(uint64_t dst, void *src, size_t count)
+    , void (*memcpy_from_64)(void *dst, uint64_t src, size_t count)
+#endif
+) {
+    optional_resource = true;
+    struct file_handle *ret = uri_open(uri, type, allow_high_mem
+#if defined (__i386__)
+        , memcpy_to_64, memcpy_from_64
+#endif
+    );
+    optional_resource = false;
+    return ret;
 }
 
 #if defined (UEFI)

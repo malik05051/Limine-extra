@@ -222,7 +222,7 @@ void blake2b(void *out, const void *in, size_t in_len) {
 
 /*  Streaming filter: wraps a source file_handle and hashes bytes as
     they are read sequentially. The hash is finalized and compared via
-    blake2b_check_hash(). Non-sequential reads panic -- the filter is
+    blake2b_check_hash(). Non-sequential reads panic: the filter is
     meant to sit underneath uri_open, which reads it monotonically.  */
 struct blake2b_handle {
     struct file_handle  *source;
@@ -235,7 +235,7 @@ struct blake2b_handle {
 static uint64_t blake2b_read(struct file_handle *fh, void *buf, uint64_t loc, uint64_t count) {
     struct blake2b_handle *h = fh->fd;
     if (loc != h->pos) {
-        panic(false, "blake2b filter: non-sequential read (pos=%x, loc=%x)",
+        panic(false, "blake2b filter: non-sequential read (pos=%X, loc=%X)",
               (uint64_t)h->pos, loc);
     }
     uint64_t got = fread(h->source, buf, loc, count);
@@ -259,8 +259,8 @@ struct file_handle *blake2b_open(struct file_handle *source) {
 
     struct file_handle *ret = ext_mem_alloc(sizeof(struct file_handle));
     ret->fd = h;
-    ret->read = (void *)blake2b_read;
-    ret->close = (void *)blake2b_close;
+    ret->read = blake2b_read;
+    ret->close = blake2b_close;
     ret->size = source->size;
     ret->vol = source->vol;
     if (source->path != NULL && source->path_len > 0) {
@@ -278,7 +278,7 @@ struct file_handle *blake2b_open(struct file_handle *source) {
 }
 
 bool blake2b_check_hash(struct file_handle *fh, void *reference_hash) {
-    if (fh->read != (void *)blake2b_read) {
+    if (fh->read != blake2b_read) {
         panic(false, "blake2b_check_hash: not a blake2b filter handle");
     }
     struct blake2b_handle *h = fh->fd;

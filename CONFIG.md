@@ -87,14 +87,16 @@ Miscellaneous:
 * `timeout` - Specifies the timeout in seconds before the selected *entry* is
   automatically booted (see `default_entry` option). Decimal values such as
   `0.25` are accepted, and the timeout is capped at `9999` seconds. If set to
-  `no`, disable automatic boot. If set to `0`, boot the selected entry
-  instantly, without showing the menu. A value that is neither `no` nor a
-  number is treated as `0`. On UEFI, the Boot Loader Interface's
-  `LoaderConfigTimeoutOneShot` EFI variable, where set (for example by
-  `systemctl reboot --boot-loader-menu=`), overrides this option for the boot
-  that consumes it, and the persistent `LoaderConfigTimeout` variable (for
-  example from `bootctl set-timeout`) is honoured only where this option is
-  not set.
+  `no` (exactly, in lowercase), disable automatic boot. If set to `0`, boot the
+  selected entry instantly, without showing the menu. Any other value is read
+  from its leading digits and an optional `.` followed by fractional digits,
+  ignoring whatever follows: `10s` is 10 seconds, `1e3` is 1 second, and `2,5`
+  is 2 seconds. A value without such digits, such as `No`, is treated as `0`.
+  On UEFI, the Boot Loader Interface's `LoaderConfigTimeoutOneShot` EFI
+  variable, where set (for example by `systemctl reboot --boot-loader-menu=`),
+  overrides this option for the boot that consumes it, and the persistent
+  `LoaderConfigTimeout` variable (for example from `bootctl set-timeout`) is
+  honoured only where this option is not set.
 * `quiet` - If set to `yes`, enable quiet mode, where all screen output except
   panics and important warnings is suppressed. If `timeout` is neither `0` nor
   `no`, the `timeout` still occurs, and pressing any key during the timeout
@@ -150,7 +152,8 @@ Miscellaneous:
 * `hash_mismatch_panic` - If set to `no`, do not panic if there is a hash
   mismatch for a file. A warning is printed and Limine then waits for a
   keypress: `Y` continues the boot, any other key returns to the menu. Forced
-  to `yes` when Secure Boot is active and a config hash is enrolled.
+  to `yes` when Secure Boot is active and a config hash is enrolled. A
+  wallpaper or font whose hash does not match is skipped either way.
 * `measured_boot` - If set to `yes`, opt in to measured boot. Forced to `yes`
   when Secure Boot is active and a config hash is enrolled, and forced back to
   `no` if the firmware does not expose a TPM 2.0/CC measurement interface. See
@@ -267,7 +270,8 @@ Editor control options:
   kernel/executable. Valid protocols are: `linux`, `limine`, `multiboot`
   (or `multiboot1`), `multiboot2`, `efi`, `efi_boot_entry` and `bios`.
 * `cmdline` - The command line string to be passed to the kernel/executable.
-  Can be omitted.
+  Can be omitted. The `bios` and `efi_boot_entry` protocols take no command
+  line, and ignore it.
 * `kernel_cmdline` - Alias of `cmdline`.
 * `if_fw_type` - Hide the entry if the firmware does not match. Valid values
   are: `BIOS`, `UEFI`
@@ -360,6 +364,11 @@ Editor control options:
     before the image is verified; verification still happens when an entry is
     booted.
 
+  If the chainloaded application returns, as a UEFI Shell does when exited,
+  Limine does not go back to its menu: it exits in turn, passing the status and
+  exit data the application returned on to whatever started Limine, usually the
+  firmware's boot manager.
+
 * EFI Boot Entry protocol:
   * `entry` - The name of the EFI boot entry to reboot into.
 
@@ -439,26 +448,28 @@ name is only available through Rock Ridge.
 
 For MBR, the four primary partitions take the numbers 1 to 4 by the slot they
 occupy, whether or not that slot is used, and logical partitions are numbered
-from 5 upwards by counting along the extended partition's chain. Every entry
-with a non-zero size takes a number, except an entry of an extended type --
-of which only the first non-empty one is the link to the next EBR -- and one
-in an EBR's last two slots that falls outside either the extended partition
-or the extent the link that led to that EBR declared.
+from 5 upwards by counting along the chain of every extended partition, one
+chain after another in slot order. Every entry with a non-zero size takes a
+number, except an entry of an extended type (of which only an EBR's first
+non-empty one is the link to the next EBR) and one in an EBR's last two slots
+that falls outside either the extended partition or the extent the link that
+led to that EBR declared.
 
 A path can optionally be suffixed with a blake2b hash for the referenced file,
 by appending a pound character (`#`) followed by the blake2b hash.
 E.g.: `boot():/somemodule.tar#ca6914d2...446b470a`.
 When Secure Boot is active and a config hash is enrolled, all file paths
 **must** have a hash appended or Limine will panic (except for wallpapers and
-fonts, which are silently skipped instead, falling back to defaults). Without
-an enrolled hash Limine treats Secure Boot as inactive; see
-[USAGE.md](USAGE.md#secure-boot).
+fonts, which are silently skipped instead, falling back to defaults, and for
+images chainloaded with the `efi` protocol, whose signature the firmware
+verifies instead). Without an enrolled hash Limine treats Secure Boot as
+inactive; see [USAGE.md](USAGE.md#secure-boot).
 
 A gzip-compressed resource is indicated by inserting a dollar character (`$`)
 before the resource string. This allows for transparent decompression. For
-such resources, the hash covers the consumed compressed gzip member bytes,
-not the decompressed data and not trailing bytes outside the consumed member.
-The hash thus authenticates the on-disk payload bytes Limine uses.
+such resources, the hash covers the whole file as stored on disk (its
+compressed bytes, including anything after the gzip data), not the decompressed
+data. The hash is checked before the data is decompressed.
 
 ## Macros
 
@@ -475,7 +486,9 @@ cmdline: something before ${MY_MACRO} something after
 ```
 
 Macros must always be placed inside `${...}` where `...` is the arbitrary macro
-name.
+name. A macro that is not defined expands to an empty string, without any
+warning, so a misspelt `${ROOTDEV}` turns `root=${ROOTDEV} quiet` into
+`root= quiet`.
 
 ### Built-in macros
 

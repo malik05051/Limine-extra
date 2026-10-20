@@ -177,13 +177,7 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
     bool has_reloc_header = false;
     struct multiboot_header_tag_relocatable reloc_tag = {0};
 
-    bool is_new_acpi_required = false;
-    bool is_old_acpi_required = false;
-
-    bool is_elf_info_requested = false;
-
 #if defined (UEFI)
-    bool is_framebuffer_required = false;
     bool is_framebuffer_declared = false;
     uint32_t console_flags = 0;
 #endif
@@ -220,7 +214,8 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
                     uint32_t r = request->requests[i];
 
                     switch (r) {
-                        // We already support the following requests:
+                        // Supported requests. Multiboot 2 3.1.4 has a tag whose
+                        // information is unavailable left out, required or not.
                         case MULTIBOOT_TAG_TYPE_CMDLINE:
                         case MULTIBOOT_TAG_TYPE_BOOT_LOADER_NAME:
                         case MULTIBOOT_TAG_TYPE_MODULE:
@@ -228,33 +223,28 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
                         case MULTIBOOT_TAG_TYPE_SMBIOS:
                         case MULTIBOOT_TAG_TYPE_BASIC_MEMINFO:
                             break;
-                        #if defined (UEFI)
                         case MULTIBOOT_TAG_TYPE_EFI_MMAP:
-                            break;
                         case MULTIBOOT_TAG_TYPE_EFI32:
                         case MULTIBOOT_TAG_TYPE_EFI32_IH:
                         case MULTIBOOT_TAG_TYPE_EFI64:
                         case MULTIBOOT_TAG_TYPE_EFI64_IH:
                             break;
-                        #endif
                         case MULTIBOOT_TAG_TYPE_FRAMEBUFFER:
                         #if defined (UEFI)
-                            is_framebuffer_required = is_required;
                             is_framebuffer_declared = true;
                         #endif
                             break;
                         case MULTIBOOT_TAG_TYPE_ACPI_NEW:
-                            is_new_acpi_required = is_required;
-                            break;
                         case MULTIBOOT_TAG_TYPE_ACPI_OLD:
-                            is_old_acpi_required = is_required;
-                            break;
                         case MULTIBOOT_TAG_TYPE_ELF_SECTIONS:
-                            is_elf_info_requested = is_required;
-                            break;
                         case MULTIBOOT_TAG_TYPE_LOAD_BASE_ADDR:
                         case MULTIBOOT_TAG_TYPE_NETWORK:
                             break;
+                        // The end tag carries no information, so asking for it
+                        // asks for nothing.
+                        case MULTIBOOT_TAG_TYPE_END: {
+                            break;
+                        }
                         default:
                             if (is_required)
                                 panic(true, "multiboot2: Requested tag `%d` which is not supported", r);
@@ -446,8 +436,9 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
     int64_t reloc_slide = 0;
 
     if (has_reloc_header) {
+        // Multiboot 2 gives align 0 no meaning; take it as no constraint.
         if (reloc_tag.align == 0) {
-            panic(true, "multiboot2: Relocatable tag has align=0");
+            reloc_tag.align = 1;
         }
 
         bool reloc_ascend;
@@ -603,11 +594,7 @@ reloc_fail:
     //////////////////////////////////////////////
     // Create ELF info tag
     //////////////////////////////////////////////
-    if (section_hdr_info_valid == false) {
-        if (is_elf_info_requested) {
-            panic(true, "multiboot2: Cannot return ELF file information");
-        }
-    } else {
+    if (section_hdr_info_valid) {
         size_t section_table_size = CHECKED_MUL(section_hdr_info.section_entry_size, section_hdr_info.num,
             panic(true, "multiboot2: ELF section table size overflow"));
         if (section_hdr_info.section_offset > kernel_file_size ||
@@ -636,7 +623,9 @@ reloc_fail:
             panic(true, "multiboot2: ELF section entry size too small");
         }
 
-        for (size_t i = 0; i < section_hdr_info.num; i++) {
+        // Section header 0 describes no section, and under extended numbering
+        // its sh_size is the section count.
+        for (size_t i = 1; i < section_hdr_info.num; i++) {
             if (bits == 64)  {
                 struct elf64_shdr *shdr = (void *)tag->sections + i * section_hdr_info.section_entry_size;
 
@@ -871,7 +860,7 @@ textmode:
                 tag->common.size = sizeof(struct multiboot_tag_framebuffer_common);
 #elif defined (UEFI)
                 // Bit 0 makes a console mandatory, and none can be provided here.
-                if (is_framebuffer_required || (console_flags & 1)) {
+                if (console_flags & 1) {
                     panic(true, "multiboot2: Failed to set video mode");
                 } else {
                     goto skip_modeset;
@@ -884,7 +873,8 @@ textmode:
                 tag->common.framebuffer_height = fbs[0].framebuffer_height;
                 tag->common.framebuffer_bpp = fbs[0].framebuffer_bpp;
                 tag->common.framebuffer_type = MULTIBOOT_FRAMEBUFFER_TYPE_RGB; // We only support RGB for VBE
-                tag->common.size = sizeof(struct multiboot_tag_framebuffer);
+                // 6 bytes of colour info; size leaves out the padding after them.
+                tag->common.size = sizeof(struct multiboot_tag_framebuffer_common) + 6;
 
                 tag->framebuffer_red_field_position = fbs[0].red_mask_shift;
                 tag->framebuffer_red_mask_size = fbs[0].red_mask_size;
@@ -924,8 +914,6 @@ skip_modeset:;
 
             memcpy(tag->rsdp, new_rsdp, sizeof(struct rsdp));
             append_tag(info_idx, tag);
-        } else if (is_new_acpi_required) {
-            panic(true, "multiboot2: XSDP requested but not found");
         }
     }
 
@@ -944,8 +932,6 @@ skip_modeset:;
 
             memcpy(tag->rsdp, old_rsdp, 20);
             append_tag(info_idx, tag);
-        } else if (is_old_acpi_required) {
-            panic(true, "multiboot2: RSDP requested but not found");
         }
     }
 
@@ -1102,10 +1088,10 @@ skip_modeset:;
             struct multiboot_tag_network *tag = (struct multiboot_tag_network *)(mb2_info + info_idx);
 
             tag->type = MULTIBOOT_TAG_TYPE_NETWORK;
-            tag->size = sizeof(struct multiboot_tag_network) + DHCP_ACK_PACKET_LEN;
+            tag->size = sizeof(struct multiboot_tag_network) + cached_dhcp_packet_len;
 
             // Copy over the DHCP packet.
-            memcpy(tag->dhcpack, cached_dhcp_packet, DHCP_ACK_PACKET_LEN);
+            memcpy(tag->dhcpack, cached_dhcp_packet, cached_dhcp_packet_len);
             append_tag(info_idx, tag);
         }
     }

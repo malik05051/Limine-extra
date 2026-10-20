@@ -404,13 +404,85 @@ int paging_mode_va_bits(int paging_mode) {
     }
 }
 
-int vmm_max_paging_mode(void)
-{
-    if (bsp_hart == NULL || !(bsp_hart->flags & RISCV_HART_HAS_MMU)) {
-        panic(false, "vmm: BSP hart does not advertise MMU support");
+// Translation is only on between the two `satp` writes, and nothing between
+// them touches memory, so this code is all that must stay mapped; it is kept
+// out of line so that its address is where the switch happens. The first fence
+// orders the stores to the table before its walks, the second drops what they
+// cached.
+__attribute__((noinline))
+static size_t try_satp(size_t satp) {
+    size_t ret;
+    asm volatile (
+        "sfence.vma\n\t"
+        "csrw satp, %1\n\t"
+        "csrr %0, satp\n\t"
+        "csrw satp, zero\n\t"
+        "sfence.vma"
+        : "=r"(ret)
+        : "r"(satp)
+        : "memory"
+    );
+    return ret;
+}
+
+// With translation off, a `satp` write naming a mode the hart lacks has no
+// effect at all (privileged ISA, satp), so the first mode to read back, from
+// the largest down, is the largest it supports. With translation on, as some
+// firmware runs, each try would switch it off under the firmware, so the mode
+// in use is taken instead, as one the hart is known to support.
+static int probe_paging_mode(void) {
+    size_t satp = csr_read("satp");
+    if (satp != 0) {
+        int mode = satp >> 60;
+        if (mode < PAGING_MODE_RISCV_SV39 || mode > PAGING_MODE_RISCV_SV57) {
+            return -1;
+        }
+        return mode;
     }
 
-    return PAGING_MODE_RISCV_SV39 + bsp_hart->mmu_type;
+    pt_entry_t *table = ext_mem_alloc(PT_SIZE);
+
+    size_t sstatus;
+    asm volatile ("csrrci %0, sstatus, 0x2" : "=r"(sstatus) :: "memory");
+
+    int ret = -1;
+    for (int mode = PAGING_MODE_RISCV_SV57; mode >= PAGING_MODE_RISCV_SV39; mode--) {
+        // Only the lower half of what a mode translates can map to itself.
+        uint64_t leaf_size = page_sizes[mode - 6];
+        if ((uintptr_t)try_satp >= leaf_size * 256) {
+            break;
+        }
+
+        for (uint64_t i = 0; i < 256; i++) {
+            table[i] = pte_new(i * leaf_size, PT_FLAG_VALID | PT_FLAG_RWX | PT_FLAG_ACCESSED | PT_FLAG_DIRTY);
+        }
+
+        if ((try_satp(make_satp(mode, table)) >> 60) == (size_t)mode) {
+            ret = mode;
+            break;
+        }
+    }
+
+    if (sstatus & 0x2) {
+        asm volatile ("csrsi sstatus, 0x2" ::: "memory");
+    }
+
+    pmm_free(table, PT_SIZE);
+    return ret;
+}
+
+int vmm_max_paging_mode(void)
+{
+    if (bsp_hart != NULL && (bsp_hart->flags & RISCV_HART_HAS_MMU)) {
+        return PAGING_MODE_RISCV_SV39 + bsp_hart->mmu_type;
+    }
+
+    int mode = probe_paging_mode();
+    if (mode < 0) {
+        panic(true, "vmm: BSP hart does not advertise MMU support and none could be determined");
+    }
+
+    return mode;
 }
 
 static pt_entry_t pbmt_nc = 0;
@@ -471,6 +543,7 @@ void map_page(pagemap_t pagemap, uint64_t virt_addr, uint64_t phys_addr, uint64_
 #define PT_FLAG_MAT_CC  ((uint64_t)1 << 4)
 #define PT_FLAG_MAT_WUC ((uint64_t)1 << 5)
 #define PT_FLAG_HUGE    ((uint64_t)1 << 6)
+#define PT_FLAG_PRESENT ((uint64_t)1 << 7)
 #define PT_FLAG_WRITE   ((uint64_t)1 << 8)
 #define PT_FLAG_NX      ((uint64_t)1 << 62)
 #define PT_PADDR_MASK   ((uint64_t)0x0000FFFFFFFFF000)
@@ -528,7 +601,47 @@ pagemap_t new_pagemap(int paging_mode) {
     return pagemap;
 }
 
+#define LOONGARCH_CPUCFG1_HP ((uint32_t)1 << 24)
+#define LOONGARCH_CPUCFG3_SPW_HP_HF ((uint32_t)1 << 11)
+#define LOONGARCH_CSR_PRCFG2 0x22
+
+// The page walk fills a huge entry into the TLB as two half-size pages, so a
+// 2MiB entry needs 1MiB TLB pages and a 1GiB entry 512MiB ones. Bit n of
+// PSAVL is set when 2^n byte TLB pages are supported.
+static enum page_size largest_page_size(void) {
+    static bool probed = false;
+    static enum page_size largest = Size4KiB;
+
+    if (!probed) {
+        uint64_t psavl = csr_read64(LOONGARCH_CSR_PRCFG2);
+
+        if ((read_cpucfg(1) & LOONGARCH_CPUCFG1_HP)
+         && (read_cpucfg(3) & LOONGARCH_CPUCFG3_SPW_HP_HF)
+         && (psavl & ((uint64_t)1 << 20))) {
+            largest = Size2MiB;
+
+            if (psavl & ((uint64_t)1 << 29)) {
+                largest = Size1GiB;
+            }
+        }
+
+        probed = true;
+    }
+
+    return largest;
+}
+
 void map_page(pagemap_t pagemap, uint64_t virt_addr, uint64_t phys_addr, uint64_t flags, enum page_size pg_size) {
+    if (pg_size > largest_page_size()) {
+        enum page_size smaller = pg_size - 1;
+
+        for (uint64_t i = 0; i < page_sizes[pg_size]; i += page_sizes[smaller]) {
+            map_page(pagemap, virt_addr + i, phys_addr + i, flags, smaller);
+        }
+
+        return;
+    }
+
     size_t pml4_entry = (virt_addr & ((uint64_t)0x1ff << 39)) >> 39;
     size_t pml3_entry = (virt_addr & ((uint64_t)0x1ff << 30)) >> 30;
     size_t pml2_entry = (virt_addr & ((uint64_t)0x1ff << 21)) >> 21;
@@ -538,7 +651,8 @@ void map_page(pagemap_t pagemap, uint64_t virt_addr, uint64_t phys_addr, uint64_
 
     bool is_higher_half = virt_addr & ((uint64_t)1 << 63);
 
-    uint64_t real_flags = PT_FLAG_VALID;
+    // P never reaches the TLB, but the page walk checks it.
+    uint64_t real_flags = PT_FLAG_VALID | PT_FLAG_PRESENT;
     if (flags & VMM_FLAG_WRITE)
         real_flags |= PT_FLAG_DIRTY | PT_FLAG_WRITE;
     if (flags & VMM_FLAG_NOEXEC)

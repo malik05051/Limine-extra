@@ -435,6 +435,33 @@ AC_DEFUN([LIMINE_CHECK_LDFLAG], [
          $3])
 ])
 
+# LIMINE_CHECK_LDFLAG_Z(VAR, keyword, [action if not taken])
+# Adds -z <keyword> to <VAR>_LDFLAGS unless LD_FOR_TARGET mentions it when
+# linking nothing with them, as LLD lists no keywords in its help and newer GNU
+# ld stop at --version before warning of unknown ones. Any mention counts, as
+# gold does not call it an error.
+AC_DEFUN([LIMINE_CHECK_LDFLAG_Z], [
+    AC_MSG_CHECKING([whether $LD_FOR_TARGET accepts -z $2 for $limine_port])
+    AS_IF([LC_ALL=C $LD_FOR_TARGET $LDFLAGS_FOR_TARGET $$1_LDFLAGS -z $2 -o /dev/null 2>&1 >/dev/null | $EGREP -q '[[^-[:alnum:]]]$2([[^-[:alnum:]]]|$)'],
+        [AC_MSG_RESULT([no])
+         $3],
+        [AC_MSG_RESULT([yes])
+         $1_LDFLAGS="$$1_LDFLAGS -z $2"])
+])
+
+# LIMINE_PACK_RELATIVE_RELOCS(VAR)
+# Packs relative relocations where the linker can, as RELR tables take a
+# fraction of the room. LLD before 15 only knows --pack-dyn-relocs.
+AC_DEFUN([LIMINE_PACK_RELATIVE_RELOCS], [
+    LIMINE_CHECK_LDFLAG_Z([$1], [pack-relative-relocs], [
+        AC_MSG_CHECKING([whether $LD_FOR_TARGET accepts --pack-dyn-relocs])
+        AS_IF([limine_ld_lists_flag '--pack-dyn-relocs'],
+            [AC_MSG_RESULT([yes])
+             $1_LDFLAGS="$$1_LDFLAGS --pack-dyn-relocs=relr"],
+            [AC_MSG_RESULT([no])])
+    ])
+])
+
 # LIMINE_X86_CHECKS(VAR)
 AC_DEFUN([LIMINE_X86_CHECKS], [
     LIMINE_CHECK_CFLAG([$1], [-fno-stack-clash-protection])
@@ -446,8 +473,9 @@ AC_DEFUN([LIMINE_X86_CHECKS], [
 
 limine_cflags="m4_normalize([
     -g -Wall -Wextra -Wshadow -Wvla $WERROR_FLAG -std=gnu11 -ffreestanding
-    -fno-common -ffunction-sections -fdata-sections -fstack-protector-strong
-    -fno-stack-check -fno-omit-frame-pointer -fno-strict-aliasing -fno-lto
+    -fno-exceptions -fno-common -ffunction-sections -fdata-sections
+    -fstack-protector-strong -fno-stack-check -fno-omit-frame-pointer
+    -fno-strict-aliasing -fno-lto
 ])"
 limine_ldflags="-nostdlib -z max-page-size=0x1000 -z noexecstack --gc-sections"
 
@@ -467,35 +495,29 @@ LIMINE_PORT_FLAGS([BIOS], [the x86 BIOS port], [i686],
 ])
 
 LIMINE_PORT_FLAGS([UEFI_IA32], [the IA-32 UEFI port], [i686],
-    [$limine_cflags -fPIE -fshort-wchar -m32 -march=i686 -mno-mmx -malign-double${limine_x86_mflags:+ $limine_x86_mflags}],
+    [$limine_cflags -fPIE -fshort-wchar -m32 -march=i686 -mno-mmx${limine_x86_mflags:+ $limine_x86_mflags}],
     [$limine_ldflags -m elf_i386 -pie -z text --hash-style=gnu], [
     LIMINE_X86_CHECKS([UEFI_IA32])
-    # Clang below 9 takes -malign-double and ignores it, which lays out every
-    # firmware structure with a 64 bit member wrong, so check the alignment
-    # rather than the flag.
-    AC_MSG_CHECKING([whether $CC_FOR_TARGET aligns 64 bit types to 8 bytes for $limine_port])
-    AS_IF([printf 'struct s { char c; long long x; };\n_Static_assert(sizeof(struct s) == 16, "");\n' |
-           limine_cc_run $UEFI_IA32_CFLAGS -c -x c - -o /dev/null],
-        [AC_MSG_RESULT([yes])],
-        [AC_MSG_RESULT([no])
-         AC_MSG_ERROR([$CC_FOR_TARGET does not align 64 bit types to 8 bytes])])
+    LIMINE_PACK_RELATIVE_RELOCS([UEFI_IA32])
 ])
 
 LIMINE_PORT_FLAGS([UEFI_X86_64], [the x86-64 UEFI port], [x86_64],
     [$limine_cflags -fPIE -fshort-wchar -m64 -march=x86-64 -mno-mmx -mno-sse -mno-red-zone${limine_x86_mflags:+ $limine_x86_mflags}],
-    [$limine_ldflags -m elf_x86_64 -pie -z text --hash-style=gnu],
-    [LIMINE_X86_CHECKS([UEFI_X86_64])])
+    [$limine_ldflags -m elf_x86_64 -pie -z text --hash-style=gnu], [
+    LIMINE_X86_CHECKS([UEFI_X86_64])
+    LIMINE_PACK_RELATIVE_RELOCS([UEFI_X86_64])
+])
 
 LIMINE_PORT_FLAGS([UEFI_AARCH64], [the aarch64 UEFI port], [aarch64],
     [$limine_cflags -fPIE -fshort-wchar -mcpu=generic -march=armv8-a+nofp+nosimd -mcmodel=small],
     [$limine_ldflags -m aarch64elf -pie -z text --hash-style=gnu], [
     LIMINE_CHECK_CFLAG([UEFI_AARCH64], [-fno-stack-clash-protection])
-    LIMINE_CHECK_CFLAG([UEFI_AARCH64], [-mno-outline-atomics])
     LIMINE_CHECK_CFLAG([UEFI_AARCH64], [-mbranch-protection=none])
     # Only the linker can work around Cortex-A53 erratum 843419, so require one
     # that can.
     LIMINE_CHECK_LDFLAG([UEFI_AARCH64], [--fix-cortex-a53-843419],
         [AC_MSG_ERROR([$LD_FOR_TARGET cannot work around Cortex-A53 erratum 843419])])
+    LIMINE_PACK_RELATIVE_RELOCS([UEFI_AARCH64])
 ])
 
 # The ABI is given first, as the instruction set is checked against it.
@@ -519,6 +541,7 @@ LIMINE_PORT_FLAGS([UEFI_RISCV64], [the riscv64 UEFI port], [riscv64],
     # Keep linker relaxation away from gp, which nothing sets up. Linkers
     # without the flag only use gp if the script defines __global_pointer$.
     LIMINE_CHECK_LDFLAG([UEFI_RISCV64], [--no-relax-gp])
+    LIMINE_PACK_RELATIVE_RELOCS([UEFI_RISCV64])
 ])
 
 # -msoft-float, unlike -mfpu=none, also overrides a -mdouble-float or
@@ -547,6 +570,7 @@ LIMINE_PORT_FLAGS([UEFI_LOONGARCH64], [the loongarch64 UEFI port], [loongarch64]
     # Clang called this code model "small" before the ISA's own name.
     LIMINE_CHECK_CFLAG([UEFI_LOONGARCH64], [-mcmodel=normal], [-mcode-model],
         [LIMINE_CHECK_CFLAG([UEFI_LOONGARCH64], [-mcmodel=small], [-mcode-model])])
+    LIMINE_PACK_RELATIVE_RELOCS([UEFI_LOONGARCH64])
 ])
 
 LIMINE_COPYRIGHT=$($GREP Copyright "$SRCDIR/COPYING")

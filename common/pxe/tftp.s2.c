@@ -10,8 +10,11 @@
 #include <mm/pmm.h>
 #include <lib/misc.h>
 
-// cache the dhcp packet
+// The DHCP ACK, for the Multiboot 2 network tag. With ProxyDHCP or a separate
+// boot server, the reply naming the TFTP server has neither the client address
+// nor the DHCP server's options.
 uint8_t cached_dhcp_packet[DHCP_ACK_PACKET_LEN] = { 0 };
+size_t cached_dhcp_packet_len = 0;
 bool cached_dhcp_ack_valid = false;
 
 #if defined (BIOS)
@@ -36,18 +39,33 @@ static uint32_t get_boot_server_info(void) {
 
     struct bootph *reply = (struct bootph *)rm_desegment(cached_info.buffer.segment, cached_info.buffer.offset);
 
-    if (!cached_dhcp_ack_valid) {
-        memcpy(cached_dhcp_packet, reply, MIN(cached_info.buffer_size, DHCP_ACK_PACKET_LEN));
-        cached_dhcp_ack_valid = true;
+    return reply->sip;
+}
+
+static void cache_dhcp_ack(void) {
+    struct pxenv_get_cached_info cached_info = {
+        .status = 0,
+        .packet_type = PXENV_PACKET_TYPE_DHCP_ACK,
+    };
+
+    int ret = pxe_call(PXENV_GET_CACHED_INFO, ((uint16_t)rm_seg(&cached_info)), (uint16_t)rm_off(&cached_info));
+    if (ret || cached_info.buffer_size < sizeof(struct bootph)) {
+        return;
     }
 
-    return reply->sip;
+    void *ack = (void *)rm_desegment(cached_info.buffer.segment, cached_info.buffer.offset);
+    cached_dhcp_packet_len = MIN(cached_info.buffer_size, DHCP_ACK_PACKET_LEN);
+    memcpy(cached_dhcp_packet, ack, cached_dhcp_packet_len);
+    cached_dhcp_ack_valid = true;
 }
 
 static uint32_t parse_ip_addr(const char *server_addr) {
     uint32_t out;
 
     if (!server_addr || !strlen(server_addr)) {
+        if (!cached_dhcp_ack_valid) {
+            cache_dhcp_ack();
+        }
         return get_boot_server_info();
     }
 
@@ -187,6 +205,31 @@ struct file_handle *tftp_open(struct volume *part, const char *server_addr, cons
 
 #elif defined (UEFI)
 
+_Static_assert(sizeof(EFI_PXE_BASE_CODE_PACKET) <= DHCP_ACK_PACKET_LEN, "DHCP packet buffer too small");
+
+// The firmware keeps the packet in a fixed-size union, so its length is only
+// known from where the End option sits (RFC 2132).
+static size_t dhcp_packet_len(const uint8_t *packet, size_t max) {
+    size_t i = offsetof(EFI_PXE_BASE_CODE_DHCPV4_PACKET, DhcpOptions);
+
+    while (i < max) {
+        if (packet[i] == 255) {
+            return i + 1;
+        }
+
+        // Pad is the only other option without a length octet.
+        if (packet[i] == 0) {
+            i++;
+        } else if (i + 1 < max) {
+            i += 2 + packet[i + 1];
+        } else {
+            break;
+        }
+    }
+
+    return max;
+}
+
 static EFI_IP_ADDRESS *parse_ip_addr(struct volume *part, const char *server_addr) {
     static EFI_IP_ADDRESS out;
 
@@ -196,8 +239,10 @@ static EFI_IP_ADDRESS *parse_ip_addr(struct volume *part, const char *server_add
         else if (part->pxe_base_code->Mode->ProxyOfferReceived) packet = &part->pxe_base_code->Mode->ProxyOffer;
         else packet = &part->pxe_base_code->Mode->DhcpAck;
         memcpy(out.Addr, packet->Dhcpv4.BootpSiAddr, 4);
-        if (!cached_dhcp_ack_valid) {
-            memcpy(cached_dhcp_packet, packet, DHCP_ACK_PACKET_LEN);
+        if (!cached_dhcp_ack_valid && part->pxe_base_code->Mode->DhcpAckReceived) {
+            EFI_PXE_BASE_CODE_PACKET *ack = &part->pxe_base_code->Mode->DhcpAck;
+            cached_dhcp_packet_len = dhcp_packet_len(ack->Raw, sizeof(ack->Raw));
+            memcpy(cached_dhcp_packet, ack, cached_dhcp_packet_len);
             cached_dhcp_ack_valid = true;
         }
     } else {
@@ -216,7 +261,7 @@ struct file_handle *tftp_open(struct volume *part, const char *server_addr, cons
 
     EFI_IP_ADDRESS *ip = parse_ip_addr(part, server_addr);
 
-    uint64_t file_size;
+    EFI_UINT64 file_size;
     EFI_STATUS status;
 
     // Firmware from before EDK2 cf9ff46b rejects a NULL BufferPtr for every

@@ -21,6 +21,7 @@ static bool mouse_active = false;
 // position and visibility survive the menu data rewind so that the pointer does not
 // jump.
 static no_unwind int64_t pos_x, pos_y;
+static no_unwind int64_t initial_x, initial_y;
 static no_unwind bool pointer_pos_valid = false;
 
 // The pointer stays hidden until the mouse is first used; a plugged
@@ -76,6 +77,8 @@ static void place_pointer(void) {
     pointer_pos_valid = true;
     pos_x = (int64_t)(terms[0]->cols / 2) * 256;
     pos_y = (int64_t)(terms[0]->rows / 2) * 256;
+    initial_x = pos_x;
+    initial_y = pos_y;
 }
 
 static int move_by(int64_t dx, int64_t dy) {
@@ -88,6 +91,13 @@ static int move_by(int64_t dx, int64_t dy) {
     pos_x += dx;
     pos_y += dy;
     clamp_pointer();
+
+    // Allow initial jitter within one cell before activating the pointer.
+    if (!pointer_shown
+     && pos_x - initial_x > -256 && pos_x - initial_x < 256
+     && pos_y - initial_y > -256 && pos_y - initial_y < 256) {
+        return 0;
+    }
 
     if (pos_x != old_x || pos_y != old_y) {
         moved_pending = true;
@@ -326,9 +336,10 @@ static void pointer_draw_sprite(struct pointer_backing *bk) {
         return;
     }
 
-    uint32_t white = ((uint32_t)(0xff >> (8 - ctx->red_mask_size)) << ctx->red_mask_shift)
-                   | ((uint32_t)(0xff >> (8 - ctx->green_mask_size)) << ctx->green_mask_shift)
-                   | ((uint32_t)(0xff >> (8 - ctx->blue_mask_size)) << ctx->blue_mask_shift);
+    // Flanterm points each shift at the top 8 bits of its channel.
+    uint32_t white = (0xffu << ctx->red_mask_shift)
+                   | (0xffu << ctx->green_mask_shift)
+                   | (0xffu << ctx->blue_mask_shift);
     uint32_t black = 0;
 
     size_t w = POINTER_W * sx - clip_x, h = POINTER_H * sy - clip_y;
@@ -546,7 +557,9 @@ bool mouse_init(void) {
         return false;
     }
     outb(I8042_COMMAND, 0xa9);
-    if (i8042_read_data(&is_aux) != 0x00) {
+    // Some controllers answer 0xfa rather than 0x00 for a working port.
+    b = i8042_read_data(&is_aux);
+    if (b != 0x00 && b != 0xfa) {
         return false;
     }
 
@@ -601,8 +614,9 @@ bool mouse_init(void) {
     if (aux_command(0xe9)) {
         b = aux_read();
         if (b != -1) {
-            left_down = (b & 0x01) != 0;
-            right_down = (b & 0x02) != 0;
+            // The status byte orders the buttons unlike a movement packet.
+            left_down = (b & 0x04) != 0;
+            right_down = (b & 0x01) != 0;
         }
         aux_read();
         aux_read();
@@ -718,14 +732,14 @@ static size_t locate_pointers(EFI_GUID *guid, void **out, size_t max) {
         return 1;
     }
 
-    UINTN count = 0;
+    EFI_UINTN count = 0;
     EFI_HANDLE *handles = NULL;
-    if (gBS->LocateHandleBuffer(ByProtocol, guid, NULL, &count, &handles) != EFI_SUCCESS) {
+    if (gBS->LocateHandleBuffer(EfiByProtocol, guid, NULL, &count, &handles) != EFI_SUCCESS) {
         return 0;
     }
 
     size_t n = 0;
-    for (UINTN i = 0; i < count && n < max; i++) {
+    for (EFI_UINTN i = 0; i < count && n < max; i++) {
         if (gBS->HandleProtocol(handles[i], guid, &iface) == EFI_SUCCESS) {
             out[n++] = iface;
         }
