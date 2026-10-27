@@ -18,6 +18,21 @@ static bool smbios_entry_32_valid(struct smbios_entry_point_32 *ep) {
     return true;
 }
 
+// The structure table an SMBIOS entry point points at, or NULL where it is
+// not wholly within reach.
+void *smbios_get_table(uint64_t address, uint64_t size) {
+    if (address == 0) {
+        return NULL;
+    }
+
+    uint64_t end = CHECKED_ADD(address, size, return NULL);
+    if (end - 1 > (uintptr_t)-1) {
+        return NULL;
+    }
+
+    return (void *)(uintptr_t)address;
+}
+
 #if defined (BIOS)
 
 /// Returns the RSDP v1 pointer if available or else NULL.
@@ -186,14 +201,15 @@ static void map_single_table(uint64_t addr, uint32_t len) {
         memcpy(&length, (void *)(uintptr_t)(addr + 4), sizeof(length));
     }
 
+    uint64_t top = CHECKED_ADD(addr, length, goto past_top);
     uint64_t aligned_base = ALIGN_DOWN(addr, 4096);
-    uint64_t aligned_top  = ALIGN_UP(addr + length, 4096, panic(false, "acpi: Alignment overflow"));
+    uint64_t aligned_top  = ALIGN_UP(top, 4096, goto past_top);
 
     if (!acpi_padding_is_safe(aligned_base, addr - aligned_base)) {
         aligned_base = addr;
     }
-    if (!acpi_padding_is_safe(addr + length, aligned_top - (addr + length))) {
-        aligned_top = addr + length;
+    if (!acpi_padding_is_safe(top, aligned_top - top)) {
+        aligned_top = top;
     }
 
     uint64_t memmap_type = pmm_check_type(addr);
@@ -201,6 +217,11 @@ static void map_single_table(uint64_t addr, uint32_t len) {
     if (memmap_type != MEMMAP_ACPI_RECLAIMABLE && memmap_type != MEMMAP_ACPI_NVS) {
         memmap_alloc_range(aligned_base, aligned_top - aligned_base, MEMMAP_RESERVED_MAPPED, 0, true, false, true);
     }
+    return;
+
+past_top:
+    // No range of the memory map can describe it.
+    print("acpi: warning: Table at %X runs past the top of the address space\n", addr);
 }
 
 

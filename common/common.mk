@@ -28,7 +28,7 @@ override CPPFLAGS_FOR_TARGET := \
     -DCOM_OUTPUT=$(COM_OUTPUT) \
     -DE9_OUTPUT=$(E9_OUTPUT) \
     -DFLANTERM_IN_FLANTERM \
-    -MMD \
+    -MD \
     -MP
 
 $(call MKESCAPE,$(BUILDDIR))/libfdt/src/fdt_overlay.o: override CFLAGS_FOR_TARGET += \
@@ -268,7 +268,7 @@ $(call MKESCAPE,$(BUILDDIR))/linker_stage2only.ld: linker_bios.ld.in $(call VARS
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
 	$(CC_FOR_TARGET) -x c -E -P -undef -DLINKER_STAGE2ONLY linker_bios.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_stage2only.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine_stage2only.elf: $(OBJ_S2) $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine_stage2only.elf: $(OBJ_S2) linker_bios.ld.in $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker_stage2only.ld'
 	$(LD_FOR_TARGET) $(LDFLAGS_FOR_TARGET) '$(call OBJESCAPE,$(addprefix $(BUILDDIR)/,$(filter %.s2.o,$(OBJ_REL))))' -T'$(call SHESCAPE,$(BUILDDIR))/linker_stage2only.ld' -o '$(call SHESCAPE,$@)' || \
 		( echo "This error may mean that stage 2 was trying to use stage 3 symbols before loading stage 3" && \
@@ -278,7 +278,7 @@ $(call MKESCAPE,$(BUILDDIR))/linker_nos2map.ld: linker_bios.ld.in $(call VARSFIL
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
 	$(CC_FOR_TARGET) -x c -E -P -undef -DLINKER_NOMAP -DLINKER_NOS2MAP linker_bios.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nos2map.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET OBJCOPY_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) linker_bios.ld.in $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET OBJCOPY_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker_nos2map.ld'
 	$(LD_FOR_TARGET) $(LDFLAGS_FOR_TARGET) '$(call OBJESCAPE,$(addprefix $(BUILDDIR)/,$(OBJ_REL)))' -T'$(call SHESCAPE,$(BUILDDIR))/linker_nos2map.ld' -o '$(call SHESCAPE,$@)'
 	$(OBJCOPY_FOR_TARGET) -O binary --only-section=.note.gnu.build-id '$(call SHESCAPE,$@)' '$(call SHESCAPE,$(BUILDDIR))/build-id.s2.bin'
@@ -293,7 +293,7 @@ $(call MKESCAPE,$(BUILDDIR))/linker_nomap.ld: linker_bios.ld.in $(call VARSFILES
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
 	$(CC_FOR_TARGET) -x c -E -P -undef -DLINKER_NOMAP linker_bios.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine_nos3map.elf: $(OBJ) $(call MKESCAPE,$(BUILDDIR))/stage2.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET OBJCOPY_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine_nos3map.elf: $(OBJ) linker_bios.ld.in $(call MKESCAPE,$(BUILDDIR))/stage2.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET OBJCOPY_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 	$(LD_FOR_TARGET) $(LDFLAGS_FOR_TARGET) '$(call OBJESCAPE,$(addprefix $(BUILDDIR)/,$(OBJ_REL) stage2.map.o))' -T'$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld' -o '$(call SHESCAPE,$@)'
 	$(OBJCOPY_FOR_TARGET) -O binary --only-section=.note.gnu.build-id '$(call SHESCAPE,$@)' '$(call SHESCAPE,$(BUILDDIR))/build-id.s2.bin'
@@ -308,7 +308,7 @@ $(call MKESCAPE,$(BUILDDIR))/linker.ld: linker_bios.ld.in $(call VARSFILES,CC_FO
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
 	$(CC_FOR_TARGET) -x c -E -P -undef linker_bios.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) $(call MKESCAPE,$(BUILDDIR))/stage2.map.o $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET OBJCOPY_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) linker_bios.ld.in $(call MKESCAPE,$(BUILDDIR))/stage2.map.o $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET OBJCOPY_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 	$(LD_FOR_TARGET) $(LDFLAGS_FOR_TARGET) '$(call OBJESCAPE,$(addprefix $(BUILDDIR)/,$(OBJ_REL) stage2.map.o full.map.o))' -T'$(call SHESCAPE,$(BUILDDIR))/linker.ld' -o '$(call SHESCAPE,$@)'
 	$(OBJCOPY_FOR_TARGET) -O binary --only-section=.note.gnu.build-id '$(call SHESCAPE,$@)' '$(call SHESCAPE,$(BUILDDIR))/build-id.s2.bin'
@@ -332,13 +332,14 @@ $(call MKESCAPE,$(BUILDDIR))/full.map.o: $(call MKESCAPE,$(BUILDDIR))/limine_nom
 $(call MKESCAPE,$(BUILDDIR))/BOOTX64.EFI: $(call MKESCAPE,$(BUILDDIR))/limine.elf $(call VARSFILES,OBJCOPY_FOR_TARGET)
 	$(OBJCOPY_FOR_TARGET) -O binary '$(call SHESCAPE,$<)' '$(call SHESCAPE,$@)'
 	chmod a-x '$(call SHESCAPE,$@)'
-	dd if=/dev/null of='$(call SHESCAPE,$@)' bs=4096 seek=$$(( ($$(wc -c < '$(call SHESCAPE,$@)') + 4095) / 4096 )) 2>/dev/null
 
+# The link scripts' input section patterns hold ??, which C reads as a
+# trigraph prefix.
 $(call MKESCAPE,$(BUILDDIR))/linker_nomap.ld: linker_uefi_x86_64.ld.in $(call VARSFILES,CC_FOR_TARGET)
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
-	$(CC_FOR_TARGET) -x c -E -P -undef -DLINKER_NOMAP linker_uefi_x86_64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
+	$(CC_FOR_TARGET) -x c -E -P -undef -Wno-trigraphs -DLINKER_NOMAP linker_uefi_x86_64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) linker_uefi_x86_64.ld.in $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 	$(LD_FOR_TARGET) \
 		-T'$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld' \
@@ -346,9 +347,9 @@ $(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TA
 
 $(call MKESCAPE,$(BUILDDIR))/linker.ld: linker_uefi_x86_64.ld.in $(call VARSFILES,CC_FOR_TARGET)
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
-	$(CC_FOR_TARGET) -x c -E -P -undef linker_uefi_x86_64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
+	$(CC_FOR_TARGET) -x c -E -P -undef -Wno-trigraphs linker_uefi_x86_64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) linker_uefi_x86_64.ld.in $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 	$(LD_FOR_TARGET) \
 		-T'$(call SHESCAPE,$(BUILDDIR))/linker.ld' \
@@ -367,13 +368,12 @@ $(call MKESCAPE,$(BUILDDIR))/full.map.o: $(call MKESCAPE,$(BUILDDIR))/limine_nom
 $(call MKESCAPE,$(BUILDDIR))/BOOTAA64.EFI: $(call MKESCAPE,$(BUILDDIR))/limine.elf $(call VARSFILES,OBJCOPY_FOR_TARGET)
 	$(OBJCOPY_FOR_TARGET) -O binary '$(call SHESCAPE,$<)' '$(call SHESCAPE,$@)'
 	chmod a-x '$(call SHESCAPE,$@)'
-	dd if=/dev/null of='$(call SHESCAPE,$@)' bs=4096 seek=$$(( ($$(wc -c < '$(call SHESCAPE,$@)') + 4095) / 4096 )) 2>/dev/null
 
 $(call MKESCAPE,$(BUILDDIR))/linker_nomap.ld: linker_uefi_aarch64.ld.in $(call VARSFILES,CC_FOR_TARGET)
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
-	$(CC_FOR_TARGET) -x c -E -P -undef -DLINKER_NOMAP linker_uefi_aarch64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
+	$(CC_FOR_TARGET) -x c -E -P -undef -Wno-trigraphs -DLINKER_NOMAP linker_uefi_aarch64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) linker_uefi_aarch64.ld.in $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 	$(LD_FOR_TARGET) \
 		-T'$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld' \
@@ -381,9 +381,9 @@ $(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TA
 
 $(call MKESCAPE,$(BUILDDIR))/linker.ld: linker_uefi_aarch64.ld.in $(call VARSFILES,CC_FOR_TARGET)
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
-	$(CC_FOR_TARGET) -x c -E -P -undef linker_uefi_aarch64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
+	$(CC_FOR_TARGET) -x c -E -P -undef -Wno-trigraphs linker_uefi_aarch64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) linker_uefi_aarch64.ld.in $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 	$(LD_FOR_TARGET) \
 		-T'$(call SHESCAPE,$(BUILDDIR))/linker.ld' \
@@ -401,13 +401,12 @@ $(call MKESCAPE,$(BUILDDIR))/full.map.o: $(call MKESCAPE,$(BUILDDIR))/limine_nom
 $(call MKESCAPE,$(BUILDDIR))/BOOTRISCV64.EFI: $(call MKESCAPE,$(BUILDDIR))/limine.elf $(call VARSFILES,OBJCOPY_FOR_TARGET)
 	$(OBJCOPY_FOR_TARGET) -O binary '$(call SHESCAPE,$<)' '$(call SHESCAPE,$@)'
 	chmod a-x '$(call SHESCAPE,$@)'
-	dd if=/dev/null of='$(call SHESCAPE,$@)' bs=4096 seek=$$(( ($$(wc -c < '$(call SHESCAPE,$@)') + 4095) / 4096 )) 2>/dev/null
 
 $(call MKESCAPE,$(BUILDDIR))/linker_nomap.ld: linker_uefi_riscv64.ld.in $(call VARSFILES,CC_FOR_TARGET)
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
-	$(CC_FOR_TARGET) -x c -E -P -undef -DLINKER_NOMAP linker_uefi_riscv64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
+	$(CC_FOR_TARGET) -x c -E -P -undef -Wno-trigraphs -DLINKER_NOMAP linker_uefi_riscv64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) linker_uefi_riscv64.ld.in $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 	$(LD_FOR_TARGET) \
 		-T'$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld' \
@@ -415,9 +414,9 @@ $(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TA
 
 $(call MKESCAPE,$(BUILDDIR))/linker.ld: linker_uefi_riscv64.ld.in $(call VARSFILES,CC_FOR_TARGET)
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
-	$(CC_FOR_TARGET) -x c -E -P -undef linker_uefi_riscv64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
+	$(CC_FOR_TARGET) -x c -E -P -undef -Wno-trigraphs linker_uefi_riscv64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) linker_uefi_riscv64.ld.in $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 	$(LD_FOR_TARGET) \
 		-T'$(call SHESCAPE,$(BUILDDIR))/linker.ld' \
@@ -435,13 +434,12 @@ $(call MKESCAPE,$(BUILDDIR))/full.map.o: $(call MKESCAPE,$(BUILDDIR))/limine_nom
 $(call MKESCAPE,$(BUILDDIR))/BOOTLOONGARCH64.EFI: $(call MKESCAPE,$(BUILDDIR))/limine.elf $(call VARSFILES,OBJCOPY_FOR_TARGET)
 	$(OBJCOPY_FOR_TARGET) -O binary '$(call SHESCAPE,$<)' '$(call SHESCAPE,$@)'
 	chmod a-x '$(call SHESCAPE,$@)'
-	dd if=/dev/null of='$(call SHESCAPE,$@)' bs=4096 seek=$$(( ($$(wc -c < '$(call SHESCAPE,$@)') + 4095) / 4096 )) 2>/dev/null
 
 $(call MKESCAPE,$(BUILDDIR))/linker_nomap.ld: linker_uefi_loongarch64.ld.in $(call VARSFILES,CC_FOR_TARGET)
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
-	$(CC_FOR_TARGET) -x c -E -P -undef -DLINKER_NOMAP linker_uefi_loongarch64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
+	$(CC_FOR_TARGET) -x c -E -P -undef -Wno-trigraphs -DLINKER_NOMAP linker_uefi_loongarch64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) linker_uefi_loongarch64.ld.in $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 	$(LD_FOR_TARGET) \
 		-T'$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld' \
@@ -449,9 +447,9 @@ $(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TA
 
 $(call MKESCAPE,$(BUILDDIR))/linker.ld: linker_uefi_loongarch64.ld.in $(call VARSFILES,CC_FOR_TARGET)
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
-	$(CC_FOR_TARGET) -x c -E -P -undef linker_uefi_loongarch64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
+	$(CC_FOR_TARGET) -x c -E -P -undef -Wno-trigraphs linker_uefi_loongarch64.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) linker_uefi_loongarch64.ld.in $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 	$(LD_FOR_TARGET) \
 		-T'$(call SHESCAPE,$(BUILDDIR))/linker.ld' \
@@ -469,13 +467,12 @@ $(call MKESCAPE,$(BUILDDIR))/full.map.o: $(call MKESCAPE,$(BUILDDIR))/limine_nom
 $(call MKESCAPE,$(BUILDDIR))/BOOTIA32.EFI: $(call MKESCAPE,$(BUILDDIR))/limine.elf $(call VARSFILES,OBJCOPY_FOR_TARGET)
 	$(OBJCOPY_FOR_TARGET) -O binary '$(call SHESCAPE,$<)' '$(call SHESCAPE,$@)'
 	chmod a-x '$(call SHESCAPE,$@)'
-	dd if=/dev/null of='$(call SHESCAPE,$@)' bs=4096 seek=$$(( ($$(wc -c < '$(call SHESCAPE,$@)') + 4095) / 4096 )) 2>/dev/null
 
 $(call MKESCAPE,$(BUILDDIR))/linker_nomap.ld: linker_uefi_ia32.ld.in $(call VARSFILES,CC_FOR_TARGET)
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
-	$(CC_FOR_TARGET) -x c -E -P -undef -DLINKER_NOMAP linker_uefi_ia32.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
+	$(CC_FOR_TARGET) -x c -E -P -undef -Wno-trigraphs -DLINKER_NOMAP linker_uefi_ia32.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) linker_uefi_ia32.ld.in $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld'
 	$(LD_FOR_TARGET) \
 		-T'$(call SHESCAPE,$(BUILDDIR))/linker_nomap.ld' \
@@ -483,9 +480,9 @@ $(call MKESCAPE,$(BUILDDIR))/limine_nomap.elf: $(OBJ) $(call VARSFILES,LD_FOR_TA
 
 $(call MKESCAPE,$(BUILDDIR))/linker.ld: linker_uefi_ia32.ld.in $(call VARSFILES,CC_FOR_TARGET)
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))'
-	$(CC_FOR_TARGET) -x c -E -P -undef linker_uefi_ia32.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
+	$(CC_FOR_TARGET) -x c -E -P -undef -Wno-trigraphs linker_uefi_ia32.ld.in -o '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 
-$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
+$(call MKESCAPE,$(BUILDDIR))/limine.elf: $(OBJ) linker_uefi_ia32.ld.in $(call MKESCAPE,$(BUILDDIR))/full.map.o $(call VARSFILES,LD_FOR_TARGET LDFLAGS_FOR_TARGET)
 	$(MAKE) -f common.mk '$(call SHESCAPE,$(BUILDDIR))/linker.ld'
 	$(LD_FOR_TARGET) \
 		-T'$(call SHESCAPE,$(BUILDDIR))/linker.ld' \

@@ -10,7 +10,6 @@ extern bool bad_config;
 
 struct menu_entry {
     char *name;
-    char *comment;
     // Set only for entries whose identifier is fixed by something outside the
     // menu: a Type #1 entry is addressed by its filename, not by its title.
     char *bli_id;
@@ -19,6 +18,10 @@ struct menu_entry {
     bool expanded;
     char *body;
     struct menu_entry *next;
+    bool skipped_computed;
+    bool skipped;
+    bool dup_index_computed;
+    size_t dup_index;
 };
 
 struct conf_tuple {

@@ -13,27 +13,22 @@ BUILDDIR="$(pwd -P)"
 # onwards, but macOS still ships 3.81.
 AC_MSG_CHECKING([whether the source and build directory paths are usable])
 for bad_char in '"' "'" ':' '`' '#' '$' '&' ';' '|' '='; do
-    case "$SRCDIR" in
-        *"$bad_char"*)
-            AC_MSG_RESULT([no])
-            AC_MSG_ERROR([the source directory path contains '$bad_char'; move the source tree])
-            ;;
-    esac
+    AS_CASE(["$SRCDIR"],
+        [*"$bad_char"*],
+        [AC_MSG_RESULT([no])
+         AC_MSG_ERROR([the source directory path contains '$bad_char'; move the source tree])])
 done
 
 for bad_char in "'" '%' ':' '#' '$' '&' ';' '|' '=' '*' '?'; do
-    case "$BUILDDIR" in
-        *"$bad_char"*)
-            AC_MSG_RESULT([no])
-            AC_MSG_ERROR([the build directory path contains '$bad_char'; use a different build directory])
-            ;;
-    esac
+    AS_CASE(["$BUILDDIR"],
+        [*"$bad_char"*],
+        [AC_MSG_RESULT([no])
+         AC_MSG_ERROR([the build directory path contains '$bad_char'; use a different build directory])])
 done
 
-if test "$(printf '%s' "$SRCDIR$BUILDDIR" | wc -l)" -gt 0; then
-    AC_MSG_RESULT([no])
-    AC_MSG_ERROR([the source or build directory path contains a newline; move the tree])
-fi
+AS_IF([test "$(printf '%s' "$SRCDIR$BUILDDIR" | wc -l)" -gt 0],
+    [AC_MSG_RESULT([no])
+     AC_MSG_ERROR([the source or build directory path contains a newline; move the tree])])
 AC_MSG_RESULT([yes])
 
 AC_SUBST([SRCDIR])
@@ -185,6 +180,9 @@ AC_DEFUN([GET_PROG], [
 AC_ARG_VAR([STRIP], [strip command])
 GET_PROG([STRIP], [strip], [tool])
 
+AC_ARG_VAR([PYTHON3], [Python 3 command make check runs the checks with])
+AS_IF([test "x$PYTHON3" = "x"], [PYTHON3=python3])
+
 AC_CHECK_HEADERS([stdio.h stdlib.h stdint.h stddef.h stdbool.h stdarg.h string.h errno.h inttypes.h limits.h time.h],
     [], [AC_MSG_ERROR([required header not found])])
 
@@ -333,6 +331,7 @@ AS_IF([$CC_FOR_TARGET --version 2>/dev/null | $GREP -q '^Target: '],
     [CC_FOR_TARGET_IS_CLANG="yes"],
     [CC_FOR_TARGET_IS_CLANG="no"])
 AC_MSG_RESULT([$CC_FOR_TARGET_IS_CLANG])
+AC_SUBST([CC_FOR_TARGET_IS_CLANG])
 
 # Help lines name a flag with one dash or two, and may follow it with a comma,
 # an "=" or a "[" for its value.
@@ -495,21 +494,21 @@ LIMINE_PORT_FLAGS([BIOS], [the x86 BIOS port], [i686],
 ])
 
 LIMINE_PORT_FLAGS([UEFI_IA32], [the IA-32 UEFI port], [i686],
-    [$limine_cflags -fPIE -fshort-wchar -m32 -march=i686 -mno-mmx${limine_x86_mflags:+ $limine_x86_mflags}],
+    [$limine_cflags -fPIE -fvisibility=hidden -fshort-wchar -m32 -march=i686 -mno-mmx${limine_x86_mflags:+ $limine_x86_mflags}],
     [$limine_ldflags -m elf_i386 -pie -z text --hash-style=gnu], [
     LIMINE_X86_CHECKS([UEFI_IA32])
     LIMINE_PACK_RELATIVE_RELOCS([UEFI_IA32])
 ])
 
 LIMINE_PORT_FLAGS([UEFI_X86_64], [the x86-64 UEFI port], [x86_64],
-    [$limine_cflags -fPIE -fshort-wchar -m64 -march=x86-64 -mno-mmx -mno-sse -mno-red-zone${limine_x86_mflags:+ $limine_x86_mflags}],
+    [$limine_cflags -fPIE -fvisibility=hidden -fshort-wchar -m64 -march=x86-64 -mno-mmx -mno-sse -mno-red-zone${limine_x86_mflags:+ $limine_x86_mflags}],
     [$limine_ldflags -m elf_x86_64 -pie -z text --hash-style=gnu], [
     LIMINE_X86_CHECKS([UEFI_X86_64])
     LIMINE_PACK_RELATIVE_RELOCS([UEFI_X86_64])
 ])
 
 LIMINE_PORT_FLAGS([UEFI_AARCH64], [the aarch64 UEFI port], [aarch64],
-    [$limine_cflags -fPIE -fshort-wchar -mcpu=generic -march=armv8-a+nofp+nosimd -mcmodel=small],
+    [$limine_cflags -fPIE -fvisibility=hidden -fshort-wchar -mcpu=generic -march=armv8-a+nofp+nosimd -mcmodel=small],
     [$limine_ldflags -m aarch64elf -pie -z text --hash-style=gnu], [
     LIMINE_CHECK_CFLAG([UEFI_AARCH64], [-fno-stack-clash-protection])
     LIMINE_CHECK_CFLAG([UEFI_AARCH64], [-mbranch-protection=none])
@@ -522,7 +521,7 @@ LIMINE_PORT_FLAGS([UEFI_AARCH64], [the aarch64 UEFI port], [aarch64],
 
 # The ABI is given first, as the instruction set is checked against it.
 LIMINE_PORT_FLAGS([UEFI_RISCV64], [the riscv64 UEFI port], [riscv64],
-    [$limine_cflags -fPIE -fshort-wchar -mabi=lp64],
+    [$limine_cflags -fPIE -fvisibility=hidden -fshort-wchar -mabi=lp64],
     [$limine_ldflags -m elf64lriscv -pie -z text --hash-style=gnu], [
     LIMINE_CHECK_CFLAG([UEFI_RISCV64], [-fno-stack-clash-protection])
     LIMINE_CHECK_CFLAG([UEFI_RISCV64], [-fcf-protection=none])
@@ -547,7 +546,7 @@ LIMINE_PORT_FLAGS([UEFI_RISCV64], [the riscv64 UEFI port], [riscv64],
 # -msoft-float, unlike -mfpu=none, also overrides a -mdouble-float or
 # -msingle-float in CFLAGS_FOR_TARGET, which take effect wherever they appear.
 LIMINE_PORT_FLAGS([UEFI_LOONGARCH64], [the loongarch64 UEFI port], [loongarch64],
-    [$limine_cflags -fPIE -fshort-wchar -mabi=lp64s -march=loongarch64 -msoft-float],
+    [$limine_cflags -fPIE -fvisibility=hidden -fshort-wchar -mabi=lp64s -march=loongarch64 -msoft-float],
     [$limine_ldflags -m elf64loongarch -pie -z text --hash-style=gnu], [
     LIMINE_CHECK_CFLAG([UEFI_LOONGARCH64], [-fno-stack-clash-protection])
     # Clang 16 takes the soft float flags but still records the double float

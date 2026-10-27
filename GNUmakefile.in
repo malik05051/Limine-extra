@@ -60,6 +60,7 @@ SED := @SED@
 export SED
 AWK := @AWK@
 export AWK
+PYTHON3 := @PYTHON3@
 
 CC := @CC@
 CC_FOR_BUILD := @CC_FOR_BUILD@
@@ -80,6 +81,7 @@ OBJDUMP_FOR_TARGET := @OBJDUMP_FOR_TARGET@
 export OBJDUMP_FOR_TARGET
 READELF_FOR_TARGET := @READELF_FOR_TARGET@
 export READELF_FOR_TARGET
+override CC_FOR_TARGET_IS_CLANG := @CC_FOR_TARGET_IS_CLANG@
 
 override WERROR_FLAG := @WERROR_FLAG@
 export WERROR_FLAG
@@ -182,8 +184,52 @@ limine:
 	$(MAKE) '$(call SHESCAPE,$(BINDIR))/limine'
 
 .PHONY: clean
-clean: tools-clean limine-bios-clean limine-uefi-ia32-clean limine-uefi-x86-64-clean limine-uefi-aarch64-clean limine-uefi-riscv64-clean limine-uefi-loongarch64-clean
+clean: check-clean tools-clean limine-bios-clean limine-uefi-ia32-clean limine-uefi-x86-64-clean limine-uefi-aarch64-clean limine-uefi-riscv64-clean limine-uefi-loongarch64-clean
 	rm -rf '$(call SHESCAPE,$(BINDIR))' '$(call SHESCAPE,$(BUILDDIR))/host-build' '$(call SHESCAPE,$(BUILDDIR))/stage1.stamp'
+
+# The job count among make arguments, given as a quoted shell word: options
+# end at " -- ", and the first word of MAKEFLAGS may lack its dash.
+override JOBS_IN = $(shell printf ' %s\n' $(1) | $(SED) -n -e 's/ -- .*//' -e 's/^ *j/ -j/' -e 's/.* --jobs[= ]\{1,\}\([0-9][0-9]*\).*/\1/p' -e 's/.* -j *\([0-9][0-9]*\).*/\1/p')
+
+# The job count make was given. GNU make 4.2 and later keep it in MAKEFLAGS
+# however it was passed; older ones leave it on their command line, or in the
+# MAKEFLAGS of the environment they started with, which $(shell) still sees.
+override PARALLELISM = $(or $(call JOBS_IN,'$(call SHESCAPE,$(MAKEFLAGS))'),$(call JOBS_IN,"`ps -o args= -p $$PPID`"),$(call JOBS_IN,"$$MAKEFLAGS"),1)
+
+# The QEMU checks, running as many at a time as make has jobs, with Python
+# kept from caching bytecode beside their sources.
+# CHECKFLAGS passes options to checks/run-checks, such as "-p bios -t menu".
+.PHONY: check
+check: all edk2-ovmf-bins
+	PYTHONDONTWRITEBYTECODE=1 MAKE='$(call SHESCAPE,$(MAKE_COMMAND))' $(PYTHON3) '$(call SHESCAPE,$(SRCDIR))/checks/run-checks' --builddir '$(call SHESCAPE,$(BUILDDIR))' -j $(PARALLELISM) $(CHECKFLAGS)
+
+# The programs the checks boot, built for the ports the build enabled with the
+# toolchain that builds Limine. checks/run-checks makes them first.
+.PHONY: check-payloads
+check-payloads:
+	$(MAKE) -f '$(call SHESCAPE,$(SRCDIR))/checks/payloads/payloads.mk' \
+		SRCDIR='$(call SHESCAPE,$(SRCDIR))' \
+		OUT='$(call SHESCAPE,$(BUILDDIR))/checks-build' \
+		CC='$(call SHESCAPE,$(CC_FOR_TARGET))' \
+		LD='$(call SHESCAPE,$(LD_FOR_TARGET))' \
+		OBJCOPY='$(call SHESCAPE,$(OBJCOPY_FOR_TARGET))' \
+		READELF='$(call SHESCAPE,$(READELF_FOR_TARGET))' \
+		CC_IS_CLANG='$(CC_FOR_TARGET_IS_CLANG)' \
+		ENABLED_PORTS='$(strip $(if $(BUILD_BIOS),bios) $(if $(BUILD_UEFI_IA32),uefi-ia32) \
+			$(if $(BUILD_UEFI_X86_64),uefi-x86-64) $(if $(BUILD_UEFI_AARCH64),uefi-aarch64) \
+			$(if $(BUILD_UEFI_RISCV64),uefi-riscv64) $(if $(BUILD_UEFI_LOONGARCH64),uefi-loongarch64))'
+
+.PHONY: check-clean
+check-clean:
+	rm -rf '$(call SHESCAPE,$(BUILDDIR))/checks-build' '$(call SHESCAPE,$(BUILDDIR))/checks-results'
+
+.INTERMEDIATE: edk2-ovmf-bins.tar.gz
+edk2-ovmf-bins.tar.gz:
+	curl -fL -o $@ https://github.com/osdev0/edk2-ovmf-stable-bins/releases/latest/download/edk2-ovmf-bins.tar.gz
+
+edk2-ovmf-bins: edk2-ovmf-bins.tar.gz
+	rm -rf edk2-ovmf-bins
+	gunzip < edk2-ovmf-bins.tar.gz | tar -xf -
 
 .PHONY: install
 install: all
@@ -238,9 +284,19 @@ uninstall:
 	rm -f '$(call SHESCAPE,$(DESTDIR)$(docdir))/CONFIG.md'
 	rm -f '$(call SHESCAPE,$(DESTDIR)$(docdir))/FAQ.md'
 	rm -f '$(call SHESCAPE,$(DESTDIR)$(docdir))/USAGE.md'
+	-rmdir '$(call SHESCAPE,$(DESTDIR)$(docdir))'
 	rm -f '$(call SHESCAPE,$(DESTDIR)$(mandir))/man1/limine.1'
 	rm -f '$(call SHESCAPE,$(DESTDIR)$(bindir))/limine'
-	rm -rf '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine'
+	rm -f '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine/limine-bios.sys'
+	rm -f '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine/limine-bios-cd.bin'
+	rm -f '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine/limine-uefi-cd.bin'
+	rm -f '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine/limine-bios-pxe.bin'
+	rm -f '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine/BOOTAA64.EFI'
+	rm -f '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine/BOOTRISCV64.EFI'
+	rm -f '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine/BOOTLOONGARCH64.EFI'
+	rm -f '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine/BOOTX64.EFI'
+	rm -f '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine/BOOTIA32.EFI'
+	-rmdir '$(call SHESCAPE,$(DESTDIR)$(datarootdir))/limine'
 
 $(call MKESCAPE,$(BUILDDIR))/stage1.stamp: $(STAGE1_FILES) $(call MKESCAPE,$(BUILDDIR))/common-bios/stage2.bin.limlz
 	$(MKDIR_P) '$(call SHESCAPE,$(BUILDDIR))/decompressor-build'
@@ -389,7 +445,7 @@ dist:
 
 .PHONY: distclean
 distclean: clean
-	rm -rf .cache compile_commands.json edk2-ovmf config.log config.status GNUmakefile config.h man/man1/limine.1
+	rm -rf .cache compile_commands.json edk2-ovmf-bins config.log config.status GNUmakefile config.h man/man1/limine.1
 
 .PHONY: maintainer-clean
 maintainer-clean: distclean
