@@ -1,6 +1,6 @@
 #! /bin/sh
 
-set -ex
+set -e
 
 # Keep cd from picking a same-named directory out of CDPATH.
 # Assigned first, as some shells fail to unset an unset variable.
@@ -31,7 +31,6 @@ clone_repo_commit() {
         fi
     else
         if test -d "$2"; then
-            set +x
             echo "error: '$2' is not a Git repository" 1>&2
             exit 1
         fi
@@ -49,12 +48,12 @@ if ! test -f version; then
     clone_repo_commit \
         https://github.com/osdev0/freestanding-c-hdrs.git \
         freestanding-c-hdrs \
-        5b4a649b38e1d27f2b7470f593d58e907438aca5
+        5e951873194cf131d00abe4978426e5aaaf6e379
 
     clone_repo_commit \
         https://github.com/osdev0/freestanding-lgrt.git \
         freestanding-lgrt \
-        a6e79759589f9905ec08c5fdc7f10f34f668d145
+        3cb84d19dd20c54ec2d1d2f9b2ba635ce97bf749
     cp freestanding-lgrt/src/freestanding-lgrt.c common/freestanding-lgrt.s2.c
 
     clone_repo_commit \
@@ -67,13 +66,14 @@ if ! test -f version; then
     clone_repo_commit \
         https://github.com/Limine-Bootloader/limine-protocol.git \
         limine-protocol \
-        3a0526b700e356f0eac1b71a77697b3fd1c707a3
+        6e85ddd6f928b5b512015c4d47d1cfce2fd28079
 
     clone_repo_commit \
         https://github.com/PicoEFI/PicoEFI.git \
         picoefi \
-        0515ccde7a3ac9c52e32c9c21c924a8d50d3261e
+        dc23de6c36ae9e10e5ff290d7c3dd6c04b141a7a
 
+    # 3.1.2-1-g3e311fe
     clone_repo_commit \
         https://github.com/Mintsuki/Flanterm.git \
         flanterm \
@@ -120,7 +120,6 @@ $AUTORECONF -fvi -Wall
 # date than the ones autoreconf installs.
 AUTOMAKE_LIBDIR="$($AUTOMAKE --print-libdir 2>/dev/null)" || true
 if test -z "$AUTOMAKE_LIBDIR"; then
-    set +x
     echo "error: Missing or broken automake." 1>&2
     echo "       Please make sure automake is installed and working." 1>&2
     exit 1
@@ -130,7 +129,5 @@ for auxfile in $AUXFILES; do
     cp "$AUTOMAKE_LIBDIR/$auxfile" build-aux/
     chmod +x build-aux/$auxfile
 done
-
-set +x
 
 printf "\nSource tree bootstrapped successfully!\n"

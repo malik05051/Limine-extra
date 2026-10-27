@@ -58,11 +58,11 @@ static size_t get_multiboot2_info_size(
             ALIGN_UP(sizeof(struct multiboot_tag_efi_mmap) + (efi_desc_size * EFI_MEMMAP_MAX), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
             #if defined (__i386__)
                 ALIGN_UP(sizeof(struct multiboot_tag_efi32), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
-                ALIGN_UP(sizeof(struct multiboot_tag_efi32_ih), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
             #elif defined (__x86_64__)
                 ALIGN_UP(sizeof(struct multiboot_tag_efi64), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
-                ALIGN_UP(sizeof(struct multiboot_tag_efi64_ih), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
             #endif
+        #elif defined (BIOS)
+            ALIGN_UP(sizeof(struct multiboot_tag_bootdev), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
         #endif
         ALIGN_UP(sizeof(struct multiboot_tag_network) + DHCP_ACK_PACKET_LEN, MULTIBOOT_TAG_ALIGN, OVERFLOW) +
         ALIGN_UP(sizeof(struct multiboot_tag), MULTIBOOT_TAG_ALIGN, OVERFLOW);
@@ -126,6 +126,10 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
 
     size_t kernel_file_size = kernel_file->size;
 
+#if defined (BIOS)
+    struct volume *kernel_volume = kernel_file->pxe ? NULL : kernel_file->vol;
+#endif
+
 #if defined (UEFI)
     tpm_measure_path(TPM_PCR_BOOT_AUTH, TPM_EV_IPL, "path: ", kernel_path);
     tpm_measure(TPM_PCR_LOADED_IMAGES, TPM_EV_IPL,
@@ -136,17 +140,15 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
 
     struct multiboot_header *header = NULL;
 
-    // Per Multiboot2 spec, header must be within first 32768 bytes and 8-byte aligned.
-    // Ensure we don't read past end of file when checking magic.
-    size_t search_limit = MULTIBOOT_SEARCH;
+    // The header must lie wholly within the first 32768 bytes, 8-byte aligned;
+    // header_length says how far it reaches.
     if (kernel_file_size < sizeof(struct multiboot_header)) {
         panic(true, "multiboot2: Kernel file too small to contain header");
     }
-    if (search_limit > kernel_file_size - sizeof(struct multiboot_header)) {
-        search_limit = kernel_file_size - sizeof(struct multiboot_header);
-    }
+    size_t search_end = MIN(kernel_file_size, (size_t)MULTIBOOT_SEARCH);
 
-    for (size_t header_offset = 0; header_offset <= search_limit; header_offset += MULTIBOOT_HEADER_ALIGN) {
+    for (size_t header_offset = 0; header_offset <= search_end - sizeof(struct multiboot_header);
+         header_offset += MULTIBOOT_HEADER_ALIGN) {
         header = (void *)(kernel + header_offset);
 
         if (header->magic == MULTIBOOT2_HEADER_MAGIC) {
@@ -169,6 +171,9 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
     size_t header_offset_in_file = (uintptr_t)header - (uintptr_t)kernel;
     if (header->header_length > kernel_file_size - header_offset_in_file) {
         panic(true, "multiboot2: Header length exceeds kernel file size");
+    }
+    if (header->header_length > search_end - header_offset_in_file) {
+        panic(true, "multiboot2: Header extends past the first 32768 bytes");
     }
 
     struct multiboot_header_tag_address *addresstag = NULL;
@@ -217,6 +222,7 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
                         // Supported requests. Multiboot 2 3.1.4 has a tag whose
                         // information is unavailable left out, required or not.
                         case MULTIBOOT_TAG_TYPE_CMDLINE:
+                        case MULTIBOOT_TAG_TYPE_BOOTDEV:
                         case MULTIBOOT_TAG_TYPE_BOOT_LOADER_NAME:
                         case MULTIBOOT_TAG_TYPE_MODULE:
                         case MULTIBOOT_TAG_TYPE_MMAP:
@@ -299,17 +305,19 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
                 reloc_tag = *reloc_tag_ptr;
                 break;
             }
+            // Both only apply along with the EFI boot services tag, which is
+            // never honoured.
+            case MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS_EFI32:
             case MULTIBOOT_HEADER_TAG_ENTRY_ADDRESS_EFI64: {
-                // Ignore EFI64 entry address tag as we do not support it.
                 break;
             }
 
             default:
                 if (is_required) {
                     if (tag->type <= 10 /* max specified ID */) {
-                        panic(true, "multiboot2: Unsupported header tag type: %u\n", tag->type);
+                        panic(true, "multiboot2: Unsupported header tag type: %u", tag->type);
                     } else {
-                        panic(true, "multiboot2: Unknown custom header tag type: %u\n", tag->type);
+                        panic(true, "multiboot2: Unknown custom header tag type: %u", tag->type);
                     }
                 } else {
                     if (tag->type > 10) {
@@ -441,6 +449,12 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
             reloc_tag.align = 1;
         }
 
+        // Page 0 sits at the null pointer; keep the image out of it, whatever
+        // min_addr allows.
+        if (reloc_tag.min_addr < 0x1000) {
+            reloc_tag.min_addr = 0x1000;
+        }
+
         bool reloc_ascend;
         uint64_t relocated_base;
 
@@ -544,12 +558,24 @@ reloc_fail:
 
     acpi_get_smbios((void **)&smbios_entry_32, (void **)&smbios_entry_64);
 
+    // The tag holds the structure table each entry point points at.
+    void *smbios_table_32 = NULL, *smbios_table_64 = NULL;
+    uint32_t smbios_table_32_size = 0, smbios_table_64_size = 0;
+    if (smbios_entry_32 != NULL) {
+        smbios_table_32 = smbios_get_table(smbios_entry_32->table_address, smbios_entry_32->table_length);
+        smbios_table_32_size = smbios_entry_32->table_length;
+    }
+    if (smbios_entry_64 != NULL) {
+        smbios_table_64 = smbios_get_table(smbios_entry_64->table_address, smbios_entry_64->table_maximum_size);
+        smbios_table_64_size = smbios_entry_64->table_maximum_size;
+    }
+
     uint32_t smbios_tag_size = 0;
 
-    if (smbios_entry_32 != NULL)
-        smbios_tag_size += ALIGN_UP(sizeof(struct multiboot_tag_smbios) + smbios_entry_32->length, MULTIBOOT_TAG_ALIGN, panic(true, "multiboot2: tag size overflow"));
-    if (smbios_entry_64 != NULL)
-        smbios_tag_size += ALIGN_UP(sizeof(struct multiboot_tag_smbios) + smbios_entry_64->length, MULTIBOOT_TAG_ALIGN, panic(true, "multiboot2: tag size overflow"));
+    if (smbios_table_32 != NULL)
+        smbios_tag_size += ALIGN_UP(sizeof(struct multiboot_tag_smbios) + smbios_table_32_size, MULTIBOOT_TAG_ALIGN, panic(true, "multiboot2: tag size overflow"));
+    if (smbios_table_64 != NULL)
+        smbios_tag_size += ALIGN_UP(sizeof(struct multiboot_tag_smbios) + smbios_table_64_size, MULTIBOOT_TAG_ALIGN, panic(true, "multiboot2: tag size overflow"));
 
     size_t mb2_info_size = get_multiboot2_info_size(
         cmdline,
@@ -685,7 +711,9 @@ reloc_fail:
     //////////////////////////////////////////////
     // Create load base address tag
     //////////////////////////////////////////////
-    if (has_reloc_header) {
+    // GRUB gives it to every executable, not only relocatable ones as
+    // Multiboot2 2.0 section 3.6.23 has it.
+    {
         uint32_t size = sizeof(struct multiboot_tag_load_base_addr);
         struct multiboot_tag_load_base_addr *tag = (void *)(mb2_info + info_idx);
 
@@ -787,23 +815,20 @@ reloc_fail:
     }
 
     //////////////////////////////////////////////
-    // Create EFI image handle tag
+    // Create BIOS boot device tag
     //////////////////////////////////////////////
-#if defined (UEFI)
-    {
-    #if defined (__i386__)
-        struct multiboot_tag_efi32_ih *tag = (struct multiboot_tag_efi32_ih *)(mb2_info + info_idx);
+#if defined (BIOS)
+    // The 0-based partition, all ones where unused (Multiboot2 2.0 section
+    // 3.6.4).
+    if (kernel_volume != NULL) {
+        struct multiboot_tag_bootdev *tag = (struct multiboot_tag_bootdev *)(mb2_info + info_idx);
 
-        tag->type = MULTIBOOT_TAG_TYPE_EFI32_IH;
-        tag->size = sizeof(struct multiboot_tag_efi32_ih);
-    #elif defined (__x86_64__)
-        struct multiboot_tag_efi64_ih *tag = (struct multiboot_tag_efi64_ih *)(mb2_info + info_idx);
+        tag->type = MULTIBOOT_TAG_TYPE_BOOTDEV;
+        tag->size = sizeof(struct multiboot_tag_bootdev);
+        tag->biosdev = (uint32_t)kernel_volume->drive & 0xff;
+        tag->slice = kernel_volume->partition == 0 ? 0xffffffff : (uint32_t)(kernel_volume->partition - 1);
+        tag->part = 0xffffffff;
 
-        tag->type = MULTIBOOT_TAG_TYPE_EFI64_IH;
-        tag->size = sizeof(struct multiboot_tag_efi64_ih);
-    #endif
-
-        tag->pointer = (uintptr_t)efi_image_handle;
         append_tag(info_idx, tag);
     }
 #endif
@@ -885,8 +910,12 @@ textmode:
             }
         } else {
 #if defined (UEFI)
-            print("multiboot2: Warning: Cannot use text mode with UEFI\n");
-            goto modeset;
+            // As GRUB does, set no mode nobody asked for. Only a required
+            // console, which can only be a framebuffer here, asks for one.
+            if ((console_flags & 1) && is_framebuffer_declared) {
+                goto modeset;
+            }
+            goto skip_modeset;
 #elif defined (BIOS)
             goto textmode;
 #endif
@@ -943,32 +972,32 @@ skip_modeset:;
         // smbios 32 and 64 bit entry points are present, then we pass both of them + smbios
         // support for grub2 is unimplemented. So, we are going to assume they expect us to
         // pass both of them if available. Oh well...
-        if (smbios_entry_32 != NULL) {
+        if (smbios_table_32 != NULL) {
             struct multiboot_tag_smbios *tag = (struct multiboot_tag_smbios *)(mb2_info + info_idx);
 
             tag->type = MULTIBOOT_TAG_TYPE_SMBIOS;
-            tag->size = sizeof(struct multiboot_tag_smbios) + smbios_entry_32->length;
+            tag->size = sizeof(struct multiboot_tag_smbios) + smbios_table_32_size;
 
             tag->major = smbios_entry_32->major_version;
             tag->minor = smbios_entry_32->minor_version;
 
             memset(tag->reserved, 0, 6);
-            memcpy(tag->tables, smbios_entry_32, smbios_entry_32->length);
+            memcpy(tag->tables, smbios_table_32, smbios_table_32_size);
 
             append_tag(info_idx, tag);
         }
 
-        if (smbios_entry_64 != NULL) {
+        if (smbios_table_64 != NULL) {
             struct multiboot_tag_smbios *tag = (struct multiboot_tag_smbios *)(mb2_info + info_idx);
 
             tag->type = MULTIBOOT_TAG_TYPE_SMBIOS;
-            tag->size = sizeof(struct multiboot_tag_smbios) + smbios_entry_64->length;
+            tag->size = sizeof(struct multiboot_tag_smbios) + smbios_table_64_size;
 
             tag->major = smbios_entry_64->major_version;
             tag->minor = smbios_entry_64->minor_version;
 
             memset(tag->reserved, 0, 6);
-            memcpy(tag->tables, smbios_entry_64, smbios_entry_64->length);
+            memcpy(tag->tables, smbios_table_64, smbios_table_64_size);
 
             append_tag(info_idx, tag);
         }

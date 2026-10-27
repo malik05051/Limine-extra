@@ -86,6 +86,10 @@ noreturn void multiboot1_load(char *config, char *cmdline) {
 
     size_t kernel_file_size = kernel_file->size;
 
+#if defined (BIOS)
+    struct volume *kernel_volume = kernel_file->pxe ? NULL : kernel_file->vol;
+#endif
+
 #if defined (UEFI)
     tpm_measure_path(TPM_PCR_BOOT_AUTH, TPM_EV_IPL, "path: ", kernel_path);
     tpm_measure(TPM_PCR_LOADED_IMAGES, TPM_EV_IPL,
@@ -97,21 +101,19 @@ noreturn void multiboot1_load(char *config, char *cmdline) {
     struct multiboot1_header header = {0};
     size_t header_offset = 0;
 
-    // Per Multiboot spec, header must be within first 8192 bytes and 4-byte aligned.
-    // Ensure we don't read past end of file when checking magic or copying header.
-    size_t search_limit = 8192;
-    if (kernel_file_size < sizeof(struct multiboot1_header)) {
+    // The header must lie wholly within the first 8192 bytes, 4-byte aligned.
+    // Its magic fields lead; how far the rest reaches depends on the flags.
+    size_t magic_size = offsetof(struct multiboot1_header, header_addr);
+    if (kernel_file_size < magic_size) {
         panic(true, "multiboot1: Kernel file too small to contain header");
     }
-    if (search_limit > kernel_file_size - sizeof(struct multiboot1_header)) {
-        search_limit = kernel_file_size - sizeof(struct multiboot1_header);
-    }
+    size_t search_end = MIN(kernel_file_size, (size_t)8192);
 
-    for (header_offset = 0; header_offset <= search_limit; header_offset += 4) {
+    for (header_offset = 0; header_offset <= search_end - magic_size; header_offset += 4) {
         uint32_t v = *(uint32_t *)(kernel + header_offset);
 
         if (v == MULTIBOOT1_HEADER_MAGIC) {
-            memcpy(&header, kernel + header_offset, sizeof(header));
+            memcpy(&header, kernel + header_offset, MIN(sizeof(header), kernel_file_size - header_offset));
             break;
         }
     }
@@ -126,6 +128,19 @@ noreturn void multiboot1_load(char *config, char *cmdline) {
     // Bits 0-2 are the defined requirements; the rest of 0-15 must be refused.
     if (header.flags & 0xfff8) {
         panic(true, "multiboot1: Header requires unsupported features");
+    }
+
+    size_t header_size = magic_size;
+    if (header.flags & (1 << 2)) {
+        header_size = sizeof(struct multiboot1_header);
+    } else if (header.flags & (1 << 16)) {
+        header_size = offsetof(struct multiboot1_header, fb_mode);
+    }
+    if (header_size > kernel_file_size - header_offset) {
+        panic(true, "multiboot1: Kernel file too small to contain header");
+    }
+    if (header_size > search_end - header_offset) {
+        panic(true, "multiboot1: Header extends past the first 8192 bytes");
     }
 
     bool section_hdr_info_valid = false;
@@ -441,6 +456,16 @@ noreturn void multiboot1_load(char *config, char *cmdline) {
     multiboot1_info->bootloader_name = (uint32_t)(size_t)lowmem_bootname - mb1_info_slide;
     multiboot1_info->flags |= (1 << 9);
 
+#if defined (BIOS)
+    // The drive, then the 0-based partitions, 0xff where unused (Multiboot
+    // 0.6.96 section 3.3).
+    if (kernel_volume != NULL) {
+        uint32_t part = kernel_volume->partition == 0 ? 0xff : (uint32_t)(kernel_volume->partition - 1) & 0xff;
+        multiboot1_info->boot_device = ((uint32_t)kernel_volume->drive & 0xff) << 24 | part << 16 | 0xffff;
+        multiboot1_info->flags |= (1 << 1);
+    }
+#endif
+
     term_notready();
 
     size_t req_width = 0;
@@ -519,7 +544,8 @@ skip_modeset:;
 #endif
     } else {
 #if defined (BIOS)
-        vga_textmode_init(false);
+        // Described as GRUB describes it, though not asked for.
+        goto textmode;
 #endif
     }
 

@@ -69,19 +69,21 @@ static uint32_t parse_ip_addr(const char *server_addr) {
         return get_boot_server_info();
     }
 
-    if (inet_pton(server_addr, &out)) {
-        panic(true, "tftp: Invalid IPv4 address: \"%s\"", server_addr);
-    }
+    // The URI code refuses an address inet_pton() cannot read.
+    inet_pton(server_addr, &out);
 
     return out;
 }
 
 struct file_handle *tftp_open(struct volume *part, const char *server_addr, const char *name) {
+    // Off PXE there is no PXE API to call.
+    if (part == NULL || !part->pxe) {
+        return NULL;
+    }
+
     uint32_t server_ip = parse_ip_addr(server_addr);
     const uint16_t server_port = 69; // This couldn't be changed previously either
     int ret = 0;
-
-    (void)part;
 
     struct PXENV_UNDI_GET_INFORMATION undi_info = { 0 };
     ret = pxe_call(UNDI_GET_INFORMATION, ((uint16_t)rm_seg(&undi_info)), (uint16_t)rm_off(&undi_info));
@@ -246,9 +248,8 @@ static EFI_IP_ADDRESS *parse_ip_addr(struct volume *part, const char *server_add
             cached_dhcp_ack_valid = true;
         }
     } else {
-        if (inet_pton(server_addr, &out.Addr)) {
-            panic(true, "tftp: Invalid IPv4 address: \"%s\"", server_addr);
-        }
+        // The URI code refuses an address inet_pton() cannot read.
+        inet_pton(server_addr, &out.Addr);
     }
 
     return &out;

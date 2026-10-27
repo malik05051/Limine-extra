@@ -35,7 +35,7 @@
 
 #if defined (UEFI)
 EFI_GUID limine_efi_vendor_guid =
-    { 0x513ee0d0, 0x6e43, 0xcb05, { 0xb2, 0x72, 0xf1, 0x46, 0xa2, 0xfc, 0xb8, 0x8a } };
+    { 0x03884334, 0x1756, 0x4978, { 0x9c, 0x8c, 0x86, 0xfb, 0x89, 0x98, 0xb4, 0xea } };
 #endif
 
 #define EDITOR_MAX_BUFFER_SIZE 4096
@@ -241,6 +241,67 @@ static void print_secondary_help(size_t row, bool firmware_setup, bool uefi_shel
     }
     if (blank_entry) {
         print_help_action("B", blank_entry_label, &need_separator);
+    }
+}
+
+// The cells s takes on the terminal: none for an escape sequence or a control
+// character, and one per character however many bytes UTF-8 gives it. *keep
+// gets the length of the leading part that takes the most cells up to max,
+// ending right after its last character.
+static size_t display_width(const char *s, size_t max, size_t *keep) {
+    const uint8_t *p = (const uint8_t *)s;
+    size_t width = 0;
+    size_t i = 0;
+
+    *keep = 0;
+    while (p[i] != '\0') {
+        uint8_t c = p[i++];
+
+        if (c == '\e') {
+            if (p[i] == '[') {
+                // A CSI sequence ends at its final byte.
+                i++;
+                while (p[i] != '\0' && (p[i] < 0x40 || p[i] > 0x7e)) {
+                    i++;
+                }
+            } else if (p[i] == '(' || p[i] == ')') {
+                // The byte after these names a character set.
+                i++;
+            }
+            if (p[i] != '\0') {
+                i++;
+            }
+            continue;
+        }
+
+        if (c < 0x20 || c == 0x7f || (c & 0xc0) == 0x80) {
+            continue;
+        }
+
+        while ((p[i] & 0xc0) == 0x80) {
+            i++;
+        }
+        width++;
+        if (width <= max) {
+            *keep = i;
+        }
+    }
+
+    return width;
+}
+
+static void print_branding(void) {
+    size_t x, y;
+    terms[0]->get_cursor_pos(terms[0], &x, &y);
+    size_t max_width = terms[0]->cols - 2;
+    size_t keep;
+    size_t width = display_width(menu_branding, max_width > 3 ? max_width - 3 : 0, &keep);
+    if (width <= max_width) {
+        set_cursor_pos_helper((terms[0]->cols - width) / 2, y);
+        print("%s%s\e[0m", menu_branding_colour, menu_branding);
+    } else {
+        set_cursor_pos_helper(1, y);
+        print("%s%S...\e[0m", menu_branding_colour, menu_branding, keep);
     }
 }
 
@@ -486,19 +547,7 @@ refresh:
         size_t x, y;
         print("\n");
         if (menu_branding[0] != '\0') {
-            terms[0]->get_cursor_pos(terms[0], &x, &y);
-            {
-                size_t branding_len = strlen(menu_branding);
-                size_t max_len = terms[0]->cols - 2;
-                if (branding_len <= max_len) {
-                    set_cursor_pos_helper((terms[0]->cols - branding_len) / 2, y);
-                    print("%s%s\e[0m", menu_branding_colour, menu_branding);
-                } else {
-                    size_t keep = max_len > 3 ? max_len - 3 : 0;
-                    set_cursor_pos_helper(1, y);
-                    print("%s%S...\e[0m", menu_branding_colour, menu_branding, keep);
-                }
-            }
+            print_branding();
             print("\n\n");
         }
         terms[0]->get_cursor_pos(terms[0], &x, &y);
@@ -887,7 +936,12 @@ static bool arch_in_list(const char *list, const char *arch) {
 }
 
 static inline bool should_skip_entry(struct menu_entry *entry) {
+    if (entry->skipped_computed) {
+        return entry->skipped;
+    }
     if (entry->sub != NULL) {
+        entry->skipped = false;
+        entry->skipped_computed = true;
         return false;
     }
     char *cur_entry_protocol = config_get_value(entry->body, 0, "PROTOCOL");
@@ -901,23 +955,33 @@ static inline bool should_skip_entry(struct menu_entry *entry) {
          || strcmp(cur_entry_protocol, "efi_chainload") == 0
          || strcmp(cur_entry_protocol, "efi_boot_entry") == 0) {
 #endif
+            entry->skipped = true;
+            entry->skipped_computed = true;
             return true;
         }
     }
     char *cur_entry_if_fw_type = config_get_value(entry->body, 0, "IF_FW_TYPE");
     if (cur_entry_if_fw_type) {
         if (strcasecmp(cur_entry_if_fw_type, current_firmware()) != 0) {
+            entry->skipped = true;
+            entry->skipped_computed = true;
             return true;
         }
     }
     char *cur_entry_if_arch = config_get_value(entry->body, 0, "IF_ARCH");
     if (cur_entry_if_arch && !arch_in_list(cur_entry_if_arch, current_arch())) {
+        entry->skipped = true;
+        entry->skipped_computed = true;
         return true;
     }
     char *cur_entry_if_loader_arch = config_get_value(entry->body, 0, "IF_LOADER_ARCH");
     if (cur_entry_if_loader_arch && !arch_in_list(cur_entry_if_loader_arch, loader_arch())) {
+        entry->skipped = true;
+        entry->skipped_computed = true;
         return true;
     }
+    entry->skipped = false;
+    entry->skipped_computed = true;
     return false;
 }
 
@@ -941,6 +1005,9 @@ static size_t count_visible_entries(struct menu_entry *entry) {
 #if defined(UEFI)
 // Count same-named non-skipped siblings preceding this entry (for #N suffix).
 static size_t get_sibling_dup_index(struct menu_entry *entry) {
+    if (entry->dup_index_computed) {
+        return entry->dup_index;
+    }
     struct menu_entry *first = entry->parent != NULL ? entry->parent->sub : menu_tree;
     size_t index = 0;
     for (struct menu_entry *e = first; e != entry; e = e->next) {
@@ -951,6 +1018,8 @@ static size_t get_sibling_dup_index(struct menu_entry *entry) {
             index++;
         }
     }
+    entry->dup_index = index;
+    entry->dup_index_computed = true;
     return index;
 }
 
@@ -1255,7 +1324,6 @@ static void uki_expand_entries(struct menu_entry *node) {
             };
             entry->bli_id = join_strings(id_parts, 3);
 
-            entry->comment = node->comment;
             entry->parent = node->parent;
             entry->next = last->next;
             last->next = entry;
@@ -1269,19 +1337,24 @@ static void uki_expand_entries(struct menu_entry *node) {
     }
 }
 
-static void bli_publish_entries_walk(struct menu_entry *node) {
+static bool bli_publish_entries_walk(struct menu_entry *node) {
     for (; node != NULL; node = node->next) {
         if (should_skip_entry(node)) {
             continue;
         }
         if (node->sub != NULL) {
-            bli_publish_entries_walk(node->sub);
+            if (!bli_publish_entries_walk(node->sub)) {
+                return false;
+            }
             continue;
         }
         char buf[BLI_ID_MAX];
         bli_entry_id(node, buf);
-        bli_entries_add(buf);
+        if (!bli_entries_add(buf)) {
+            return false;
+        }
     }
+    return true;
 }
 #endif
 
@@ -1673,6 +1746,9 @@ noreturn static void boot_uefi_shell(void) {
     if (!quiet) {
         reset_term();
     }
+    // Opened the way uefi_shell_available() found it. Should the boot fail,
+    // the menu it falls back to rewinds the flag along with the rest of .bss.
+    case_insensitive_fopen = true;
     boot(shell_entry);
 }
 
@@ -1735,20 +1811,21 @@ static bool row_to_entry_index(size_t row, size_t tree_row_start, size_t window,
 }
 
 static void print_entry_comment(const struct menu_entry *entry, size_t row) {
-    if (entry->comment == NULL) {
+    const char *comment = config_get_value(entry->body, 0, "COMMENT");
+    if (comment == NULL) {
         return;
     }
 
-    size_t comment_len = strlen(entry->comment);
-    size_t max_len = terms[0]->cols - 2;
+    size_t max_width = terms[0]->cols - 2;
+    size_t keep;
+    size_t width = display_width(comment, max_width > 3 ? max_width - 3 : 0, &keep);
     FOR_TERM(TERM->scroll_enabled = false);
-    if (comment_len <= max_len) {
-        set_cursor_pos_helper((terms[0]->cols - comment_len) / 2, row);
-        print("\e[36m%s\e[0m", entry->comment);
+    if (width <= max_width) {
+        set_cursor_pos_helper((terms[0]->cols - width) / 2, row);
+        print("\e[36m%s\e[0m", comment);
     } else {
-        size_t keep = max_len > 3 ? max_len - 3 : 0;
         set_cursor_pos_helper(1, row);
-        print("\e[36m%S...\e[0m", entry->comment, keep);
+        print("\e[36m%S...\e[0m", comment, keep);
     }
     FOR_TERM(TERM->scroll_enabled = true);
 }
@@ -2079,8 +2156,12 @@ noreturn void _menu(bool first_run) {
             }
             if (is_index) {
                 selected_entry = strtoui(default_entry, NULL, 10);
-                if (selected_entry)
+                // Indices are 1-based, so 0 names no entry.
+                if (selected_entry == 0) {
+                    default_entry_unresolved = true;
+                } else {
                     selected_entry--;
+                }
             } else {
                 // Copy the path since find_entry_by_path calls config_get_value
                 // internally (via should_skip_entry), which clobbers the static buffer.
@@ -2227,25 +2308,10 @@ refresh:
     FOR_TERM(TERM->cursor_enabled = false);
 
     print("\e[2J\e[H");
-    {
-        size_t x, y;
-        print("\n");
-        if (menu_branding[0] != '\0') {
-            terms[0]->get_cursor_pos(terms[0], &x, &y);
-            {
-                size_t branding_len = strlen(menu_branding);
-                size_t max_len = terms[0]->cols - 2;
-                if (branding_len <= max_len) {
-                    set_cursor_pos_helper((terms[0]->cols - branding_len) / 2, y);
-                    print("%s%s\e[0m", menu_branding_colour, menu_branding);
-                } else {
-                    size_t keep = max_len > 3 ? max_len - 3 : 0;
-                    set_cursor_pos_helper(1, y);
-                    print("%s%S...\e[0m", menu_branding_colour, menu_branding, keep);
-                }
-            }
-            print("\n\n\n\n");
-        }
+    print("\n");
+    if (menu_branding[0] != '\0') {
+        print_branding();
+        print("\n\n\n\n");
     }
 
     if (max_entries == 0) {
@@ -2551,6 +2617,8 @@ timeout_aborted:
                     if (new_body == NULL)
                         goto refresh;
                     selected_menu_entry->body = new_body;
+                    selected_menu_entry->skipped_computed = false;
+                    selected_menu_entry->dup_index_computed = false;
                     goto autoboot;
                 }
                 break;

@@ -50,7 +50,7 @@ struct setup_header {
     uint8_t type_of_loader;
     uint8_t loadflags;
     uint8_t reserved_212[2];
-    uint8_t reserved_214[4];
+    uint32_t code32_start;
     uint32_t ramdisk_image;
     uint32_t ramdisk_size;
     uint8_t reserved_220[4];
@@ -191,6 +191,7 @@ _Static_assert(offsetof(struct boot_params, hdr.version) == 0x206, "setup_header
 _Static_assert(offsetof(struct boot_params, hdr.kernel_version) == 0x20e, "setup_header layout");
 _Static_assert(offsetof(struct boot_params, hdr.type_of_loader) == 0x210, "setup_header layout");
 _Static_assert(offsetof(struct boot_params, hdr.loadflags) == 0x211, "setup_header layout");
+_Static_assert(offsetof(struct boot_params, hdr.code32_start) == 0x214, "setup_header layout");
 _Static_assert(offsetof(struct boot_params, hdr.ramdisk_image) == 0x218, "setup_header layout");
 _Static_assert(offsetof(struct boot_params, hdr.ramdisk_size) == 0x21c, "setup_header layout");
 _Static_assert(offsetof(struct boot_params, hdr.cmd_line_ptr) == 0x228, "setup_header layout");
@@ -373,8 +374,13 @@ noreturn void linux_load(char *config, char *cmdline) {
     if (setup_header->version >= 0x20a && setup_header->init_size > kernel_alloc_size) {
         kernel_alloc_size = setup_header->init_size;
     }
+    // Non-relocatable kernels must be loaded at their required address; do
+    // not step up on failure.
+    bool relocatable_kernel = setup_header->version >= 0x205
+                           && setup_header->relocatable_kernel != 0;
+    // kernel_alignment only binds a relocatable kernel.
     uintptr_t kernel_align = 0x100000;
-    if (setup_header->version >= 0x205 && setup_header->kernel_alignment > kernel_align) {
+    if (relocatable_kernel && setup_header->kernel_alignment > kernel_align) {
         kernel_align = setup_header->kernel_alignment;
         if ((kernel_align & (kernel_align - 1)) != 0) {
             panic(true, "linux: kernel_alignment is not a power of two");
@@ -402,10 +408,6 @@ noreturn void linux_load(char *config, char *cmdline) {
      && setup_header->pref_address <= kernel_addr_limit - kernel_alloc_size) {
         kernel_search_start = (uintptr_t)setup_header->pref_address;
     }
-    // Non-relocatable kernels must be loaded at their required address; do
-    // not step up on failure.
-    bool relocatable_kernel = setup_header->version >= 0x205
-                           && setup_header->relocatable_kernel != 0;
     // The walk gets the ceiling the search start already has, so that both ends
     // of the range agree about what the handoff can express.
     uint64_t kernel_addr_max = 0;
@@ -447,6 +449,16 @@ noreturn void linux_load(char *config, char *cmdline) {
 #endif
 
     fread(kernel_file, (void *)kernel_load_addr, real_mode_code_size, kernel_file->size - real_mode_code_size);
+
+    // Boot protocol 2.15 has the loader point code32_start at wherever it put
+    // the kernel. The 64-bit entry, the only one used above 4GiB, ignores it.
+#if defined (UEFI) && defined (__x86_64__)
+    if (kernel_load_addr <= 0xffffffff) {
+        setup_header->code32_start = (uint32_t)kernel_load_addr;
+    }
+#else
+    setup_header->code32_start = (uint32_t)kernel_load_addr;
+#endif
 
 #if defined (UEFI)
     tpm_measure_path(TPM_PCR_BOOT_AUTH, TPM_EV_IPL, "path: ", kernel_path);

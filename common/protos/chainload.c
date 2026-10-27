@@ -107,7 +107,8 @@ noreturn void spinup_freebsd(uint32_t drive, uint32_t buf, uint32_t count);
 // to a partition made in a gap before the others does, so only a repeated EBR
 // marks a loop.
 static bool logical_part_entry(struct volume *p, struct mbr_entry *entry) {
-    struct volume *extended = p->backing_dev->ebr_part;
+    struct volume *disk = p->backing_dev;
+    struct volume *extended = p->extended;
     uint64_t mult = (uint64_t)p->sector_size / 512;
     uint64_t visited[256];
     uint64_t ebr_sector = 0;
@@ -141,7 +142,18 @@ static bool logical_part_entry(struct volume *p, struct mbr_entry *entry) {
             }
 
             uint64_t first_sect = extended->first_sect + ebr_sector + table[i].first_sect * mult;
-            if (first_sect != p->first_sect || table[i].sect_count * mult != p->sect_count) {
+            if (first_sect != p->first_sect) {
+                continue;
+            }
+
+            // The volume of a partition running past the disk's end was cut
+            // there, while its entry keeps the declared size.
+            uint64_t sect_count = table[i].sect_count * mult;
+            if (disk->sect_count != (uint64_t)-1 && sect_count > disk->sect_count - first_sect) {
+                sect_count = disk->sect_count - first_sect;
+            }
+
+            if (sect_count != p->sect_count) {
                 continue;
             }
 
@@ -360,16 +372,19 @@ static EFI_DEVICE_PATH_PROTOCOL *build_relative_efi_file_path(struct file_handle
 
     size_t original_path_chars = strlen(image->path);
 
-    // UTF-16 never takes more code units than UTF-8 takes bytes.
-    size_t efi_file_path_alloc_len = (original_path_chars + 1) * sizeof(EFI_CHAR16);
+    // UTF-16 never takes more code units than UTF-8 takes bytes; one more is
+    // for the backslash rooting the path, as firmware roots those of the
+    // images it loads.
+    size_t efi_file_path_alloc_len = (original_path_chars + 2) * sizeof(EFI_CHAR16);
     EFI_CHAR16 *efi_file_path = ext_mem_alloc(efi_file_path_alloc_len);
 
     size_t efi_file_path_chars;
-    utf8_to_utf16(efi_file_path, original_path_chars + 1, image->path, original_path_chars, &efi_file_path_chars);
+    utf8_to_utf16(efi_file_path + 1, original_path_chars + 1, image->path, original_path_chars, &efi_file_path_chars);
 
+    efi_file_path[0] = '\\';
     bool leading_slash = true;
-    size_t j = 0;
-    for (size_t i = 0; i < efi_file_path_chars; i++) {
+    size_t j = 1;
+    for (size_t i = 1; i <= efi_file_path_chars; i++) {
         if (efi_file_path[i] == '/' && leading_slash) {
             continue;
         }
