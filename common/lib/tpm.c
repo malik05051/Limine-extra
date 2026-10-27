@@ -196,7 +196,9 @@ void tpm_measure_tagged(uint32_t pcr, uint32_t event_id,
         tcg2, 0,
         (EFI_PHYSICAL_ADDRESS)(uintptr_t)data, (EFI_UINT64)data_size,
         (EFI_TCG2_EVENT *)event);
-    if (status != EFI_SUCCESS) {
+    if (status == EFI_VOLUME_FULL) {
+        tpm_log_full();
+    } else if (status != EFI_SUCCESS) {
         quiet = false;
         print("WARNING: tpm: HashLogExtendEvent for PCR %u failed: %X\n"
               "         This component has not been measured.\n",
