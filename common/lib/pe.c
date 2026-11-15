@@ -624,7 +624,7 @@ again:
     return true;
 }
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 size_t pe_file_sections(struct file_handle *fd, struct pe_section **out) {
     IMAGE_DOS_HEADER dos;

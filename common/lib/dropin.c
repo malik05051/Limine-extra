@@ -1,4 +1,4 @@
-#if defined (UEFI)
+#if defined(UEFI)
 
 #include <stdint.h>
 #include <stddef.h>
@@ -17,15 +17,15 @@
 
 // The interface names the drivers a firmware can run for this machine by the
 // suffix of their filename, spelt as the UEFI removable media path does.
-#if defined (__x86_64__)
+#if defined(__x86_64__)
 #  define DROPIN_SUFFIX "x64.efi"
-#elif defined (__i386__)
+#elif defined(__i386__)
 #  define DROPIN_SUFFIX "ia32.efi"
-#elif defined (__aarch64__)
+#elif defined(__aarch64__)
 #  define DROPIN_SUFFIX "aa64.efi"
-#elif defined (__riscv)
+#elif defined(__riscv)
 #  define DROPIN_SUFFIX "riscv64.efi"
-#elif defined (__loongarch64)
+#elif defined(__loongarch64)
 #  define DROPIN_SUFFIX "loongarch64.efi"
 #else
 #error "Unspecified architecture"

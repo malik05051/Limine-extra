@@ -1,7 +1,7 @@
 #ifndef LIB__DROPIN_H__
 #define LIB__DROPIN_H__
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 #include <efi.h>
 

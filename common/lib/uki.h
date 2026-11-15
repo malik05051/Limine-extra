@@ -1,7 +1,7 @@
 #ifndef LIB__UKI_H__
 #define LIB__UKI_H__
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 #include <stddef.h>
 

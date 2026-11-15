@@ -735,7 +735,7 @@ struct file_handle *uri_open_optional(char *uri, uint32_t type, bool allow_high_
     return ret;
 }
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 struct file_handle *uri_peek(char *uri) {
     // This runs while the menu is being built, where a panic would return

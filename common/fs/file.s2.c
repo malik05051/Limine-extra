@@ -42,7 +42,7 @@ bool fs_readdir(struct volume *part, const char *path,
     return fat32_readdir(part, path, callback, ctx);
 }
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 #define FS_RENAME_NAME_MAX 256
 

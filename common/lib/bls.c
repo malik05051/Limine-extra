@@ -615,7 +615,7 @@ static void bls_remember_counter(const struct bls_snippet *snippet) {
     counted->tries_done = snippet->tries_done;
 }
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 static size_t bls_append_uint(char *buf, size_t pos, unsigned value) {
     char digits[10];

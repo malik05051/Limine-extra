@@ -33,7 +33,7 @@ struct file_handle *uri_open_optional(char *uri, uint32_t type, bool allow_high_
 #endif
 );
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 // Opens the file a boot(), guid(), uuid() or fslabel() URI names for partial
 // reads, without reading it in or checking its hash. Only for metadata that

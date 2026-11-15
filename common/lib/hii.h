@@ -1,7 +1,7 @@
 #ifndef LIB__HII_H__
 #define LIB__HII_H__
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 #include <stddef.h>
 #include <stdbool.h>

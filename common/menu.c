@@ -2084,7 +2084,7 @@ noreturn void _menu(bool first_run) {
 
     bool has_entry = false;
     bool default_entry_unresolved = false;
-#if defined (UEFI)
+#if defined(UEFI)
     bool use_saved_entry = false;
 #endif
 
