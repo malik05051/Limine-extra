@@ -501,6 +501,7 @@ bool bli_smbios_pcr_recorded(void) {
 void bli_set_smbios_pcr(uint32_t pcr) {
     wchar_t buf[16];
     size_t len = wstr_append_dec(buf, 0, SIZEOF_ARRAY(buf), pcr, 1);
+    buf[len] = L'\0';
 
     bli_set_string(L"LoaderPcrSMBIOS", buf, len);
 }
