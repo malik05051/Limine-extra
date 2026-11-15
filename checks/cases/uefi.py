@@ -80,8 +80,12 @@ def uefi_bli_loader_variables(t):
     t.expect_eq(var_text(r, 'LoaderEntrySelected'), 'Dir.Probe', '[spec] LoaderEntrySelected: the entry booted')
     t.expect_eq(var_text(r, 'LoaderInfo'), f'Limine {limine_version(t.env)}', '[intent] LoaderInfo')
     features = var_data(r, 'LoaderFeatures')
-    t.expect_eq(features and struct.unpack('<Q', features)[0], 0b10000000001111,
-                '[intent] LoaderFeatures: timeouts, entries, one-shots and menu-disabled')
+    # As common/lib/bli.c sets them with neither Secure Boot nor measured boot:
+    # timeouts, entries, one-shots, boot counting, XBOOTLDR, drop-in drivers,
+    # sort keys, @saved, devicetree, menu-disabled, multi-profile UKIs, PCR
+    # banks, preferred entry and keyboard layout.
+    want = sum(1 << bit for bit in (0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 13, 14, 18, 19, 20))
+    t.expect_eq(features and struct.unpack('<Q', features)[0], want, '[intent] LoaderFeatures')
 
 
 def var(name, value):
