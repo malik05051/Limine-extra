@@ -72,7 +72,7 @@ bool decwstr_to_size(const wchar_t *buf, size_t buf_size, size_t *value) {
 }
 
 static void bli_set_string(wchar_t *variable, wchar_t *value, size_t len) {
-    gRT->SetVariable(variable,
+    gRT->set_variable(variable,
             &bli_vendor_guid,
             EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
             (len + 1) * sizeof(wchar_t),
@@ -133,17 +133,17 @@ static void bli_set_firmware_info(void) {
     size_t len;
 
     len = wstr_append(buf, 0, SIZEOF_ARRAY(buf), L"UEFI ");
-    len = wstr_append_dec(buf, len, SIZEOF_ARRAY(buf), gST->Hdr.Revision >> 16, 1);
+    len = wstr_append_dec(buf, len, SIZEOF_ARRAY(buf), gST->hdr.revision >> 16, 1);
     len = wstr_append(buf, len, SIZEOF_ARRAY(buf), L".");
-    len = wstr_append_dec(buf, len, SIZEOF_ARRAY(buf), gST->Hdr.Revision & 0xffff, 2);
+    len = wstr_append_dec(buf, len, SIZEOF_ARRAY(buf), gST->hdr.revision & 0xffff, 2);
     buf[len] = L'\0';
     bli_set_string(L"LoaderFirmwareType", buf, len);
 
-    len = wstr_append(buf, 0, SIZEOF_ARRAY(buf), gST->FirmwareVendor);
+    len = wstr_append(buf, 0, SIZEOF_ARRAY(buf), gST->firmware_vendor);
     len = wstr_append(buf, len, SIZEOF_ARRAY(buf), L" ");
-    len = wstr_append_dec(buf, len, SIZEOF_ARRAY(buf), gST->FirmwareRevision >> 16, 1);
+    len = wstr_append_dec(buf, len, SIZEOF_ARRAY(buf), gST->firmware_revision >> 16, 1);
     len = wstr_append(buf, len, SIZEOF_ARRAY(buf), L".");
-    len = wstr_append_dec(buf, len, SIZEOF_ARRAY(buf), gST->FirmwareRevision & 0xffff, 2);
+    len = wstr_append_dec(buf, len, SIZEOF_ARRAY(buf), gST->firmware_revision & 0xffff, 2);
     buf[len] = L'\0';
     bli_set_string(L"LoaderFirmwareInfo", buf, len);
 }
@@ -151,26 +151,26 @@ static void bli_set_firmware_info(void) {
 // Which binary was run, as a path on the volume it was run from: that is
 // what a loaded image's FilePath holds, spread over its file path nodes.
 static void bli_set_image_identifier(void) {
-    EFI_GUID loaded_img_prot_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
-    EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
+    struct efi_guid loaded_img_prot_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    struct efi_loaded_image_protocol *loaded_image = NULL;
 
-    if (gBS->HandleProtocol(efi_image_handle, &loaded_img_prot_guid,
+    if (gBS->handle_protocol(efi_image_handle, &loaded_img_prot_guid,
                             (void **)&loaded_image) != EFI_SUCCESS
-     || loaded_image->FilePath == NULL) {
+     || loaded_image->file_path == NULL) {
         return;
     }
 
     wchar_t path[256];
     size_t len = 0;
 
-    for (EFI_DEVICE_PATH_PROTOCOL *node = loaded_image->FilePath;
-         !EfiIsDevicePathEnd(node); node = EfiNextDevicePathNode(node)) {
-        size_t node_len = EfiDevicePathNodeLength(node);
-        if (node_len < sizeof(EFI_DEVICE_PATH_PROTOCOL)) {
+    for (struct efi_device_path_protocol *node = loaded_image->file_path;
+         !efi_is_device_path_end(node); node = efi_next_device_path_node(node)) {
+        size_t node_len = efi_device_path_node_length(node);
+        if (node_len < sizeof(struct efi_device_path_protocol)) {
             return;
         }
-        if (EfiDevicePathType(node) != EFI_MEDIA_DEVICE_PATH
-         || EfiDevicePathSubType(node) != EFI_MEDIA_FILEPATH_DP) {
+        if (efi_device_path_type(node) != EFI_MEDIA_DEVICE_PATH
+         || efi_device_path_sub_type(node) != EFI_MEDIA_FILEPATH_DP) {
             continue;
         }
 
@@ -258,7 +258,7 @@ void bli_publish_features(void) {
         features |= (1 << 21); // SMBIOS measurement
     }
 
-    gRT->SetVariable(L"LoaderFeatures",
+    gRT->set_variable(L"LoaderFeatures",
             &bli_vendor_guid,
             EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
             sizeof(features),
@@ -471,15 +471,15 @@ void bli_set_last_booted_entry(const char *id) {
     // This one survives the reboot it exists for, so it is worth not writing
     // when nothing changed: NVRAM has a limited number of erase cycles.
     wchar_t current[MENU_PATH_MAX];
-    EFI_UINTN current_size = sizeof(current);
-    if (gRT->GetVariable(L"LoaderEntryLastBooted", &bli_vendor_guid, NULL,
+    size_t current_size = sizeof(current);
+    if (gRT->get_variable(L"LoaderEntryLastBooted", &bli_vendor_guid, NULL,
                          &current_size, current) == 0
      && current_size == (len + 1) * sizeof(wchar_t)
      && memcmp(current, wide_id, current_size) == 0) {
         return;
     }
 
-    gRT->SetVariable(L"LoaderEntryLastBooted",
+    gRT->set_variable(L"LoaderEntryLastBooted",
             &bli_vendor_guid,
             EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS
                 | EFI_VARIABLE_RUNTIME_ACCESS,
@@ -488,8 +488,8 @@ void bli_set_last_booted_entry(const char *id) {
 }
 
 bool bli_smbios_pcr_recorded(void) {
-    EFI_UINTN size = 0;
-    EFI_STATUS status = gRT->GetVariable(L"LoaderPcrSMBIOS", &bli_vendor_guid,
+    size_t size = 0;
+    efi_status status = gRT->get_variable(L"LoaderPcrSMBIOS", &bli_vendor_guid,
                                          NULL, &size, NULL);
 
     // A present variable answers a null buffer with EFI_BUFFER_TOO_SMALL, but

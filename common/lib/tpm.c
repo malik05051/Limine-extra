@@ -84,9 +84,9 @@ void tpm_init(void) {
         status = tcg2_proto->get_capability(tcg2_proto, &cap);
         if (status == EFI_SUCCESS && cap.tpm_present_flag) {
             tcg2 = tcg2_proto;
-            if (cap.ProtocolVersion.Major > 1
-             || (cap.ProtocolVersion.Major == 1 && cap.ProtocolVersion.Minor >= 1)) {
-                active_pcr_banks = cap.ActivePcrBanks;
+            if (cap.protocol_version.major > 1
+             || (cap.protocol_version.major == 1 && cap.protocol_version.minor >= 1)) {
+                active_pcr_banks = cap.active_pcr_banks;
             } else {
                 active_pcr_banks = TPM_ACTIVE_PCR_BANKS_UNKNOWN;
             }
@@ -152,11 +152,11 @@ static void tpm_extend_failed(void) {
 // An EFI_TCG2_EVENT whose payload is a TCG_PCClientTaggedEvent, which is how
 // the newer event types carry a machine-readable tag alongside the text.
 struct tcg2_tagged_event {
-    EFI_UINT32 Size;
-    EFI_TCG2_EVENT_HEADER Header;
-    EFI_UINT32 EventId;
-    EFI_UINT32 EventSize;
-    EFI_UINT8 Event[];
+    uint32_t size;
+    struct efi_tcg2_event_header header;
+    uint32_t event_id;
+    uint32_t event_size;
+    uint8_t event[];
 } __attribute__((packed));
 
 void tpm_measure_tagged(uint32_t pcr, uint32_t event_id,
@@ -175,27 +175,27 @@ void tpm_measure_tagged(uint32_t pcr, uint32_t event_id,
 
     size_t desc_chars = desc != NULL ? strlen(desc) : 0;
     size_t desc_size = (desc_chars + 1) * sizeof(wchar_t);
-    size_t event_size = offsetof(struct tcg2_tagged_event, Event) + desc_size;
+    size_t event_size = offsetof(struct tcg2_tagged_event, event) + desc_size;
 
     struct tcg2_tagged_event *event = ext_mem_alloc(event_size);
-    event->Size = (EFI_UINT32)event_size;
-    event->Header.HeaderSize = sizeof(EFI_TCG2_EVENT_HEADER);
-    event->Header.HeaderVersion = 1;
-    event->Header.PCRIndex = pcr;
-    event->Header.EventType = TPM_EV_EVENT_TAG;
-    event->EventId = event_id;
-    event->EventSize = (EFI_UINT32)desc_size;
+    event->size = (uint32_t)event_size;
+    event->header.header_size = sizeof(struct efi_tcg2_event_header);
+    event->header.header_version = 1;
+    event->header.pcr_index = pcr;
+    event->header.event_type = TPM_EV_EVENT_TAG;
+    event->event_id = event_id;
+    event->event_size = (uint32_t)desc_size;
 
-    wchar_t *wide = (wchar_t *)event->Event;
+    wchar_t *wide = (wchar_t *)event->event;
     for (size_t i = 0; i < desc_chars; i++) {
         wide[i] = (unsigned char)desc[i];
     }
     wide[desc_chars] = L'\0';
 
-    EFI_STATUS status = tcg2->HashLogExtendEvent(
+    efi_status status = tcg2->hash_log_extend_event(
         tcg2, 0,
-        (EFI_PHYSICAL_ADDRESS)(uintptr_t)data, (EFI_UINT64)data_size,
-        (EFI_TCG2_EVENT *)event);
+        (efi_physical_address)(uintptr_t)data, (uint64_t)data_size,
+        (struct efi_tcg2_event *)event);
     if (status == EFI_VOLUME_FULL) {
         tpm_log_full();
     } else if (status != EFI_SUCCESS) {

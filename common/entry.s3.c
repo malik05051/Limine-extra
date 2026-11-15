@@ -66,12 +66,12 @@ noreturn void uefi_entry(efi_handle image_handle, struct efi_system_table *syste
     // A drop-in driver may be what makes a volume readable at all, so they
     // go up before the volume index is built.
     {
-        EFI_GUID loaded_img_prot_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
-        EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
+        struct efi_guid loaded_img_prot_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+        struct efi_loaded_image_protocol *loaded_image = NULL;
 
-        if (gBS->HandleProtocol(ImageHandle, &loaded_img_prot_guid,
+        if (gBS->handle_protocol(image_handle, &loaded_img_prot_guid,
                                 (void **)&loaded_image) == EFI_SUCCESS) {
-            dropin_load_drivers(ImageHandle, loaded_image->DeviceHandle);
+            dropin_load_drivers(image_handle, loaded_image->device_handle);
         }
     }
 
