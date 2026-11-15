@@ -1,4 +1,4 @@
-#if defined (__x86_64__) || defined (__i386__)
+#if defined(__x86_64__) || defined(__i386__)
 
 #include <stdint.h>
 #include <stddef.h>
@@ -19,6 +19,11 @@
 #define LAPIC_REG_SVR         0x0f0
 #define LAPIC_REG_TPR         0x080
 #define LAPIC_REG_VERSION     0x030
+#define LAPIC_REG_EXT_FEATURE 0x400
+#define LAPIC_REG_EXT_CONTROL 0x410
+
+// ExtApicIdCap and ExtApicIdEn
+#define LAPIC_EXT_APIC_ID ((uint32_t)1 << 2)
 
 static uint32_t pending_lint0 = UINT32_MAX; // no override
 static uint32_t pending_lint1 = UINT32_MAX; // no override
@@ -65,13 +70,8 @@ static uint32_t lapic_madt_nmi_flags_to_lvt(uint16_t flags) {
     }
     // 0b00 (conforms) and 0b01 (active high) leave bit 13 clear
 
-    // Trigger mode: bits 3:2 of flags
-    uint8_t trigger = (flags >> 2) & 0x3;
-    if (trigger == 0x3) {
-        lvt |= (1 << 15); // level triggered
-    }
-    // 0b00 (conforms) and 0b01 (edge) leave bit 15 clear
-
+    // NMIs are edge sensitive whatever the flags say. Intel SDM 325462-093
+    // Vol. 3A, 13.5.1.
     return lvt;
 }
 
@@ -343,6 +343,17 @@ void lapic_icr_wait(void) {
         }
         asm volatile ("pause");
     }
+}
+
+// AMD APM 40332 rev. 4.11, 16.3.4 to 16.3.6.
+bool lapic_enable_ext_apic_id(void) {
+    if ((lapic_read(LAPIC_REG_VERSION) & ((uint32_t)1 << 31)) == 0
+     || (lapic_read(LAPIC_REG_EXT_FEATURE) & LAPIC_EXT_APIC_ID) == 0) {
+        return false;
+    }
+
+    lapic_write(LAPIC_REG_EXT_CONTROL, lapic_read(LAPIC_REG_EXT_CONTROL) | LAPIC_EXT_APIC_ID);
+    return true;
 }
 
 bool x2apic_check(void) {

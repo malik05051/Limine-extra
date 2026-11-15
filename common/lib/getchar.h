@@ -1,5 +1,5 @@
-#ifndef LIB__GETCHAR_H__
-#define LIB__GETCHAR_H__
+#ifndef LIB__GETCHAR_H
+#define LIB__GETCHAR_H
 
 #include <stddef.h>
 
@@ -16,10 +16,10 @@
 #define GETCHAR_ESCAPE       (-20)
 #define GETCHAR_MOUSE        (-30)
 
-#if defined (BIOS)
+#if defined(BIOS)
 #   define GETCHAR_RCTRL 0x4
 #   define GETCHAR_LCTRL GETCHAR_RCTRL
-#elif defined (UEFI)
+#elif defined(UEFI)
 #   define GETCHAR_RCTRL EFI_RIGHT_CONTROL_PRESSED
 #   define GETCHAR_LCTRL EFI_LEFT_CONTROL_PRESSED
 #endif

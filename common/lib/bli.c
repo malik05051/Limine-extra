@@ -1,4 +1,4 @@
-#if defined (UEFI)
+#if defined(UEFI)
 
 #include <stdint.h>
 #include <stddef.h>
@@ -14,7 +14,7 @@
 
 #define LIMINE_BRAND L"Limine " LIMINE_VERSION
 
-static EFI_GUID bli_vendor_guid = { 0x4a67b082, 0x0a4c, 0x41cf, { 0xb6, 0xc7, 0x44, 0x0b, 0x29, 0xbb, 0x8c, 0x4f } };
+static struct efi_guid bli_vendor_guid = { 0x4a67b082, 0x0a4c, 0x41cf, { 0xb6, 0xc7, 0x44, 0x0b, 0x29, 0xbb, 0x8c, 0x4f } };
 
 // The buffer must be at least 21 bytes long
 void uint64_to_decwstr(uint64_t value, wchar_t *buf) {
@@ -89,7 +89,7 @@ void bli_set_loader_time(wchar_t *variable, uint64_t time) {
     size_t len = 0;
     while (time_wstr[len] != L'\0') len++;
 
-    gRT->SetVariable(variable,
+    gRT->set_variable(variable,
             &bli_vendor_guid,
             EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
             (len + 1) * sizeof(wchar_t),
@@ -268,7 +268,7 @@ void bli_publish_features(void) {
 void init_bli(void) {
     bli_set_loader_time(L"LoaderTimeInitUSec", usec_at_bootloader_entry);
 
-    gRT->SetVariable(L"LoaderInfo",
+    gRT->set_variable(L"LoaderInfo",
             &bli_vendor_guid,
             EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
             sizeof(LIMINE_BRAND),
@@ -289,7 +289,7 @@ void init_bli(void) {
             part_uuid[i] = (wchar_t) part_uuid_str[i];
         }
 
-        gRT->SetVariable(L"LoaderDevicePartUUID",
+        gRT->set_variable(L"LoaderDevicePartUUID",
                 &bli_vendor_guid,
                 EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
                 sizeof(part_uuid),
@@ -310,10 +310,10 @@ void bli_on_boot(void) {
 // through to the sources a set one-shot variable is defined to override.
 static bool handle_timeout(wchar_t *variable, bool erase, uint64_t *timeout_ms, bool *skip_timeout) {
     wchar_t timeout_buf[256];
-    EFI_UINTN getvar_size = sizeof(timeout_buf) - 2;
+    size_t getvar_size = sizeof(timeout_buf) - 2;
     uint32_t attrs;
 
-    if (gRT->GetVariable(variable,
+    if (gRT->get_variable(variable,
                              &bli_vendor_guid,
                              &attrs,
                              &getvar_size,
@@ -322,7 +322,7 @@ static bool handle_timeout(wchar_t *variable, bool erase, uint64_t *timeout_ms, 
     }
 
     if (erase) {
-        gRT->SetVariable(variable, &bli_vendor_guid,
+        gRT->set_variable(variable, &bli_vendor_guid,
             attrs,
             0, NULL);
     }
@@ -405,7 +405,7 @@ bool bli_entries_add(const char *id) {
 }
 
 void bli_entries_publish(void) {
-    gRT->SetVariable(L"LoaderEntries",
+    gRT->set_variable(L"LoaderEntries",
             &bli_vendor_guid,
             EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
             loader_entries_len * sizeof(wchar_t),
@@ -414,15 +414,15 @@ void bli_entries_publish(void) {
 
 static bool handle_entry(wchar_t *variable, bool erase, char *path, size_t buf_size) {
     wchar_t wide_path[256];
-    EFI_UINTN getvar_size = sizeof(wide_path) - 2;
+    size_t getvar_size = sizeof(wide_path) - 2;
     uint32_t attrs;
-    if (gRT->GetVariable(variable,
+    if (gRT->get_variable(variable,
                              &bli_vendor_guid,
                              &attrs,
                              &getvar_size,
                              wide_path) == 0 && getvar_size > 0) {
         if (erase) {
-            gRT->SetVariable(variable, &bli_vendor_guid,
+            gRT->set_variable(variable, &bli_vendor_guid,
                 attrs,
                 0, NULL);
         }
@@ -515,7 +515,7 @@ void bli_set_selected_entry(const char *path) {
         wide_path[pos] = path[pos];
     }
     wide_path[len] = L'\0';
-    gRT->SetVariable(L"LoaderEntrySelected",
+    gRT->set_variable(L"LoaderEntrySelected",
             &bli_vendor_guid,
             EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS,
             (len + 1) * sizeof(wchar_t),

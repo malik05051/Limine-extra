@@ -1,11 +1,11 @@
-#ifndef FS__FILE_H__
-#define FS__FILE_H__
+#ifndef FS__FILE_H
+#define FS__FILE_H
 
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <lib/part.h>
-#if defined (UEFI)
+#if defined(UEFI)
 #  include <efi.h>
 #endif
 
@@ -26,8 +26,8 @@ struct file_handle {
     void (*close)(struct file_handle *fd);
     uint64_t   size;
     uint64_t   load_addr_64;
-#if defined (UEFI)
-    EFI_HANDLE efi_part_handle;
+#if defined(UEFI)
+    efi_handle efi_part_handle;
 #endif
     bool pxe;
     uint8_t pxe_ip[4];

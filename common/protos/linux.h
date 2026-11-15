@@ -1,5 +1,5 @@
-#ifndef PROTOS__LINUX_H__
-#define PROTOS__LINUX_H__
+#ifndef PROTOS__LINUX_H
+#define PROTOS__LINUX_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -72,7 +72,7 @@ _Static_assert(sizeof(struct screen_info) == 0x40, "screen_info layout");
 
 noreturn void linux_load(char *config, char *cmdline);
 
-#if defined (UEFI)
+#if defined(UEFI)
 void linux_install_efi_tpm_event_log(void);
 #endif
 

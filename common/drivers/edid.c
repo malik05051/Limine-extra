@@ -31,7 +31,7 @@ static bool edid_is_valid(const struct edid_info_struct *edid) {
     return sum == 0;
 }
 
-#if defined (BIOS)
+#if defined(BIOS)
 
 #include <lib/real.h>
 
@@ -69,27 +69,27 @@ success:
 
 #endif
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 #include <efi.h>
 
-struct edid_info_struct *get_edid_info(EFI_HANDLE gop_handle) {
+struct edid_info_struct *get_edid_info(efi_handle gop_handle) {
     struct edid_info_struct *buf = ext_mem_alloc(sizeof(struct edid_info_struct));
 
-    EFI_STATUS status;
+    efi_status status;
 
-    EFI_EDID_ACTIVE_PROTOCOL *edid = NULL;
-    EFI_GUID edid_guid = EFI_EDID_ACTIVE_PROTOCOL_GUID;
+    struct efi_edid_active_protocol *edid = NULL;
+    struct efi_guid edid_guid = EFI_EDID_ACTIVE_PROTOCOL_GUID;
 
-    status = gBS->HandleProtocol(gop_handle, &edid_guid, (void **)&edid);
+    status = gBS->handle_protocol(gop_handle, &edid_guid, (void **)&edid);
 
     if (status)
         goto fail;
 
-    if (edid->SizeOfEdid < sizeof(struct edid_info_struct))
+    if (edid->size_of_edid < sizeof(struct edid_info_struct))
         goto fail;
 
-    memcpy(buf, edid->Edid, sizeof(struct edid_info_struct));
+    memcpy(buf, edid->edid, sizeof(struct edid_info_struct));
 
     if (edid_is_valid(buf))
         goto success;

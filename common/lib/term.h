@@ -1,5 +1,5 @@
-#ifndef LIB__TERM_H__
-#define LIB__TERM_H__
+#ifndef LIB__TERM_H
+#define LIB__TERM_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -7,14 +7,12 @@
 #include <lib/print.h>
 #include <flanterm.h>
 
-enum {
-    _NOT_READY,
-    GTERM,
-    TEXTMODE,
-    FALLBACK
-};
+#define _NOT_READY 0
+#define GTERM 1
+#define TEXTMODE 2
+#define FALLBACK 3
 
-#if defined (BIOS)
+#if defined(BIOS)
 extern int current_video_mode;
 #endif
 
@@ -55,7 +53,7 @@ static inline void set_cursor_pos_helper(size_t x, size_t y) {
 
 void term_notready(void);
 void term_fallback(void);
-#if defined (UEFI)
+#if defined(UEFI)
 void term_prepare_post_ebs(void);
 #endif
 void _term_write(struct flanterm_context *term, uint64_t buf, uint64_t count);

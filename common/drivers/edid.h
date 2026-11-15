@@ -1,5 +1,5 @@
-#ifndef DRIVERS__EDID_H__
-#define DRIVERS__EDID_H__
+#ifndef DRIVERS__EDID_H
+#define DRIVERS__EDID_H
 
 #include <stdint.h>
 
@@ -30,13 +30,13 @@ struct edid_info_struct {
     uint8_t checksum;
 } __attribute__((packed));
 
-#if defined (UEFI)
+#if defined(UEFI)
 #include <efi.h>
 
-struct edid_info_struct *get_edid_info(EFI_HANDLE gop_handle);
+struct edid_info_struct *get_edid_info(efi_handle gop_handle);
 #endif
 
-#if defined (BIOS)
+#if defined(BIOS)
 struct edid_info_struct *get_edid_info(void);
 #endif
 

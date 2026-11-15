@@ -1,5 +1,5 @@
-#ifndef LIB__TPM_H__
-#define LIB__TPM_H__
+#ifndef LIB__TPM_H
+#define LIB__TPM_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -19,7 +19,7 @@
 // describing the machine itself belong here.
 #define TPM_PCR_PLATFORM_CONFIG 1
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 void tpm_init(void);
 
