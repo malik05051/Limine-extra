@@ -1,5 +1,5 @@
-#ifndef LIB__DROPIN_H__
-#define LIB__DROPIN_H__
+#ifndef LIB__DROPIN_H
+#define LIB__DROPIN_H
 
 #if defined(UEFI)
 

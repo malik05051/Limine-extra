@@ -1,5 +1,5 @@
-#ifndef LIB__UKI_H__
-#define LIB__UKI_H__
+#ifndef LIB__UKI_H
+#define LIB__UKI_H
 
 #if defined(UEFI)
 

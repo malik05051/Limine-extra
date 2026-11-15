@@ -1,5 +1,5 @@
-#ifndef LIB__BLS_H__
-#define LIB__BLS_H__
+#ifndef LIB__BLS_H
+#define LIB__BLS_H
 
 // Discover Type #1 boot loader entries under /loader/entries on the boot
 // volume and append them to the menu tree, ordered as the Boot Loader
