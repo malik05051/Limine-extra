@@ -42,12 +42,12 @@ bool fs_readdir(struct volume *part, const char *path,
     return fat32_readdir(part, path, callback, ctx);
 }
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 #define FS_RENAME_NAME_MAX 256
 
 // The firmware wants a backslash-separated path in UTF-16.
-static bool fs_to_efi_path(EFI_CHAR16 *out, size_t out_size, const char *path) {
+static bool fs_to_efi_path(uint16_t *out, size_t out_size, const char *path) {
     size_t pos = 0;
 
     if (path[0] != '/') {
@@ -64,7 +64,7 @@ static bool fs_to_efi_path(EFI_CHAR16 *out, size_t out_size, const char *path) {
         if ((unsigned char)*path > 0x7f) {
             return false;
         }
-        out[pos++] = *path == '/' ? L'\\' : (EFI_CHAR16)*path;
+        out[pos++] = *path == '/' ? L'\\' : (uint16_t)*path;
     }
 
     out[pos] = L'\0';
@@ -81,26 +81,26 @@ bool fs_rename(struct volume *part, const char *path, const char *new_name) {
         return false;
     }
 
-    EFI_CHAR16 wide_path[512];
+    uint16_t wide_path[512];
     if (!fs_to_efi_path(wide_path, SIZEOF_ARRAY(wide_path), path)) {
         return false;
     }
 
-    EFI_GUID fs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
-    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = NULL;
-    if (gBS->HandleProtocol(part->efi_part_handle, &fs_guid, (void **)&fs) != EFI_SUCCESS) {
+    struct efi_guid fs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+    struct efi_simple_file_system_protocol *fs = NULL;
+    if (gBS->handle_protocol(part->efi_part_handle, &fs_guid, (void **)&fs) != EFI_SUCCESS) {
         return false;
     }
 
-    EFI_FILE_PROTOCOL *root = NULL;
-    if (fs->OpenVolume(fs, &root) != EFI_SUCCESS) {
+    struct efi_file_protocol *root = NULL;
+    if (fs->open_volume(fs, &root) != EFI_SUCCESS) {
         return false;
     }
 
-    EFI_FILE_PROTOCOL *file = NULL;
-    EFI_STATUS status = root->Open(root, &file, wide_path,
+    struct efi_file_protocol *file = NULL;
+    efi_status status = root->open(root, &file, wide_path,
                                    EFI_FILE_MODE_READ | EFI_FILE_MODE_WRITE, 0);
-    root->Close(root);
+    root->close(root);
 
     if (status != EFI_SUCCESS) {
         return false;
@@ -108,31 +108,31 @@ bool fs_rename(struct volume *part, const char *path, const char *new_name) {
 
     // SetInfo takes a whole EFI_FILE_INFO back, so the existing one is read
     // first and only its name replaced.
-    EFI_GUID info_guid = EFI_FILE_INFO_ID;
-    size_t info_size = EFI_SIZE_OF_EFI_FILE_INFO + FS_RENAME_NAME_MAX * sizeof(EFI_CHAR16);
-    EFI_FILE_INFO *info = ext_mem_alloc(info_size);
+    struct efi_guid info_guid = EFI_FILE_INFO_ID;
+    size_t info_size = EFI_SIZE_OF_EFI_FILE_INFO + FS_RENAME_NAME_MAX * sizeof(uint16_t);
+    struct efi_file_info *info = ext_mem_alloc(info_size);
 
-    EFI_UINTN size = info_size;
+    size_t size = info_size;
     bool ok = false;
 
-    if (file->GetInfo(file, &info_guid, &size, info) == EFI_SUCCESS) {
+    if (file->get_info(file, &info_guid, &size, info) == EFI_SUCCESS) {
         for (size_t i = 0; i < name_len; i++) {
             if ((unsigned char)new_name[i] > 0x7f) {
                 goto out;
             }
-            info->FileName[i] = new_name[i];
+            info->file_name[i] = new_name[i];
         }
-        info->FileName[name_len] = L'\0';
+        info->file_name[name_len] = L'\0';
 
-        size = EFI_SIZE_OF_EFI_FILE_INFO + (name_len + 1) * sizeof(EFI_CHAR16);
-        info->Size = size;
+        size = EFI_SIZE_OF_EFI_FILE_INFO + (name_len + 1) * sizeof(uint16_t);
+        info->size = size;
 
-        ok = file->SetInfo(file, &info_guid, size, info) == EFI_SUCCESS;
+        ok = file->set_info(file, &info_guid, size, info) == EFI_SUCCESS;
     }
 
 out:
     pmm_free(info, info_size);
-    file->Close(file);
+    file->close(file);
 
     return ok;
 }
@@ -198,7 +198,7 @@ uint64_t fread(struct file_handle *fd, void *buf, uint64_t loc, uint64_t count) 
     }
 
     if (fd->is_memfile) {
-#if defined (__i386__)
+#if defined(__i386__)
         if (fd->is_high_mem) {
             panic(false, "fread: memfile resides above 4 GiB; caller must use load_addr_64 directly");
         }

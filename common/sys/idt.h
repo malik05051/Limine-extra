@@ -1,9 +1,9 @@
-#ifndef SYS__IDT_H__
-#define SYS__IDT_H__
+#ifndef SYS__IDT_H
+#define SYS__IDT_H
 
 #include <stdint.h>
 
-#if defined (__i386__)
+#if defined(__i386__)
 
 struct idtr {
     uint16_t limit;
@@ -18,7 +18,7 @@ struct idt_entry {
     uint16_t offset_hi;
 } __attribute__((packed));
 
-#elif defined (__x86_64__)
+#elif defined(__x86_64__)
 
 struct idtr {
     uint16_t limit;
@@ -37,7 +37,7 @@ struct idt_entry {
 
 #endif
 
-#if defined (BIOS)
+#if defined(BIOS)
 
 extern struct idtr idt;
 
@@ -45,11 +45,9 @@ void init_idt(void);
 
 #endif
 
-enum {
-    IRQ_NO_FLUSH,
-    IRQ_PIC_ONLY_FLUSH,
-    IRQ_PIC_APIC_FLUSH
-};
+#define IRQ_NO_FLUSH 0
+#define IRQ_PIC_ONLY_FLUSH 1
+#define IRQ_PIC_APIC_FLUSH 2
 
 extern int irq_flush_type;
 

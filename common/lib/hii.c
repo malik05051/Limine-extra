@@ -1,4 +1,4 @@
-#if defined (UEFI)
+#if defined(UEFI)
 
 #include <stdint.h>
 #include <stddef.h>
@@ -12,7 +12,7 @@
 // follows it lands on its natural alignment.
 struct hii_keyboard_layout {
     uint16_t layout_length;
-    EFI_GUID guid;
+    struct efi_guid guid;
     uint32_t descriptor_string_offset;
     uint8_t descriptor_count;
 } __attribute__((packed));
@@ -26,31 +26,31 @@ struct hii_description_string_bundle {
 } __attribute__((packed));
 
 bool hii_get_keyboard_layout(wchar_t *buf, size_t buf_size) {
-    EFI_GUID hii_db_guid = EFI_HII_DATABASE_PROTOCOL_GUID;
-    EFI_HII_DATABASE_PROTOCOL *hii_db = NULL;
+    struct efi_guid hii_db_guid = EFI_HII_DATABASE_PROTOCOL_GUID;
+    struct efi_hii_database_protocol *hii_db = NULL;
 
-    if (gBS->LocateProtocol(&hii_db_guid, NULL, (void **)&hii_db) != EFI_SUCCESS
+    if (gBS->locate_protocol(&hii_db_guid, NULL, (void **)&hii_db) != EFI_SUCCESS
      || hii_db == NULL) {
         return false;
     }
 
     // The sizing call is defined to fail; a success means the firmware did
     // not understand the request.
-    EFI_UINT16 length = 0;
-    if (hii_db->GetKeyboardLayout(hii_db, NULL, &length, NULL) != EFI_BUFFER_TOO_SMALL
+    uint16_t length = 0;
+    if (hii_db->get_keyboard_layout(hii_db, NULL, &length, NULL) != EFI_BUFFER_TOO_SMALL
      || length < sizeof(struct hii_keyboard_layout)) {
         return false;
     }
 
     struct hii_keyboard_layout *layout = NULL;
-    if (gBS->AllocatePool(EfiLoaderData, length, (void **)&layout) != EFI_SUCCESS) {
+    if (gBS->allocate_pool(EFI_LOADER_DATA, length, (void **)&layout) != EFI_SUCCESS) {
         return false;
     }
 
     bool ret = false;
 
-    EFI_UINT16 got = length;
-    if (hii_db->GetKeyboardLayout(hii_db, NULL, &got, (EFI_HII_KEYBOARD_LAYOUT *)layout) != EFI_SUCCESS
+    uint16_t got = length;
+    if (hii_db->get_keyboard_layout(hii_db, NULL, &got, (struct efi_hii_keyboard_layout *)layout) != EFI_SUCCESS
      || got != length || layout->layout_length != length) {
         goto out;
     }
@@ -82,7 +82,7 @@ bool hii_get_keyboard_layout(wchar_t *buf, size_t buf_size) {
     ret = true;
 
 out:
-    gBS->FreePool(layout);
+    gBS->free_pool(layout);
     return ret;
 }
 

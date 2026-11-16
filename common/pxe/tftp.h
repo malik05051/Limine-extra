@@ -1,11 +1,11 @@
-#ifndef TFTP_H
-#define TFTP_H
+#ifndef PXE__TFTP_H
+#define PXE__TFTP_H
 
 #include <stdint.h>
 #include <stddef.h>
 #include <fs/file.h>
 
-#if defined (BIOS)
+#if defined(BIOS)
 
 #define UNDI_GET_INFORMATION 0xC
 

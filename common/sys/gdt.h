@@ -1,13 +1,13 @@
-#ifndef SYS__GDT_H__
-#define SYS__GDT_H__
+#ifndef SYS__GDT_H
+#define SYS__GDT_H
 
 #include <stdint.h>
 
 struct gdtr {
     uint16_t limit;
-#if defined (__x86_64__)
+#if defined(__x86_64__)
     uint64_t ptr;
-#elif defined (__i386__)
+#elif defined(__i386__)
     uint32_t ptr;
     uint32_t ptr_hi;
 #endif

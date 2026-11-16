@@ -1,7 +1,7 @@
-#ifndef LIB__BLI_H__
-#define LIB__BLI_H__
+#ifndef LIB__BLI_H
+#define LIB__BLI_H
 
-#if defined (UEFI)
+#if defined(UEFI)
 
 void init_bli(void);
 

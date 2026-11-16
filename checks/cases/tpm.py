@@ -223,9 +223,13 @@ def tpm_cc_measurements(t):
     for flags, warning in ((1, 'WARNING: tpm: no measurement register for PCR 8'),
                            (2, 'WARNING: tpm: CC HashLogExtendEvent for PCR 8 (MR 3) failed')):
         m = cc_boot(t, flags, config, files)
-        shown = answer_prompts(t, m, 'y', lambda: 'E DONE' in m.stream(t.kernel_channel).text(), 4)
-        t.expect_eq(shown, 4, f'flags {flags}: a prompt for each of the four measurements')
-        t.check(warning in ESCAPES.sub('', m.stream('serial').text()), f'flags {flags}: {warning!r}')
+        shown = answer_prompts(t, m, 'y', lambda: 'E DONE' in m.stream(t.kernel_channel).text(), 4 + 8)
+        serial = ESCAPES.sub('', m.stream('serial').text())
+        # One more prompt per SMBIOS structure measured into PCR 1, however
+        # many of types 1, 2 and 11 the firmware describes the machine with.
+        smbios = len(re.findall(r'WARNING: tpm: [^\n]*PCR 1\b', serial))
+        t.expect_eq(shown - smbios, 4, f'flags {flags}: a prompt for each of the four measurements')
+        t.check(warning in serial, f'flags {flags}: {warning!r}')
         m.stop()
     m = cc_boot(t, 1, config, files)
     answer_prompts(t, m, 'n', lambda: CC_PROMPT in ESCAPES.sub('', m.stream('serial').text()), 1)

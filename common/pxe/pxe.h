@@ -1,5 +1,5 @@
-#ifndef PXE_H
-#define PXE_H
+#ifndef PXE__PXE_H
+#define PXE__PXE_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -13,7 +13,7 @@ extern uint8_t cached_dhcp_packet[DHCP_ACK_PACKET_LEN];
 extern size_t cached_dhcp_packet_len;
 extern bool cached_dhcp_ack_valid;
 
-#if defined (BIOS)
+#if defined(BIOS)
 
 struct volume *pxe_bind_volume(void);
 void pxe_init(void);
@@ -130,9 +130,12 @@ struct pxenv_get_cached_info {
     uint16_t buffer_limit;
 } __attribute__((packed));
 
-#elif defined (UEFI)
+#elif defined(UEFI)
 
-struct volume *pxe_bind_volume(EFI_HANDLE efi_handle, EFI_PXE_BASE_CODE_PROTOCOL *pxe_base_code);
+struct volume *pxe_bind_volume(
+    efi_handle handle,
+    struct efi_pxe_base_code_protocol *pxe_base_code
+);
 
 #endif
 

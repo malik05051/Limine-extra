@@ -1,5 +1,5 @@
-#ifndef LIB__MISC_H__
-#define LIB__MISC_H__
+#ifndef LIB__MISC_H
+#define LIB__MISC_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -8,25 +8,25 @@
 #include <fs/file.h>
 #include <lib/part.h>
 #include <lib/libc.h>
-#if defined (UEFI)
+#if defined(UEFI)
 #  include <efi.h>
 #endif
 
-#if defined (UEFI)
-extern EFI_SYSTEM_TABLE *gST;
-extern EFI_BOOT_SERVICES *gBS;
-extern EFI_RUNTIME_SERVICES *gRT;
-extern EFI_HANDLE efi_image_handle;
-extern EFI_MEMORY_DESCRIPTOR *efi_mmap;
-extern EFI_UINTN efi_mmap_size, efi_desc_size, efi_mmap_key;
-extern EFI_UINT32 efi_desc_ver;
+#if defined(UEFI)
+extern struct efi_system_table *gST;
+extern struct efi_boot_services *gBS;
+extern struct efi_runtime_services *gRT;
+extern efi_handle efi_image_handle;
+extern struct efi_memory_descriptor *efi_mmap;
+extern size_t efi_mmap_size, efi_desc_size, efi_mmap_key;
+extern uint32_t efi_desc_ver;
 
 extern bool efi_boot_services_exited;
-bool efi_exit_boot_services(void);
+bool efi_leave_boot_services(void);
 
-// Room for the map efi_exit_boot_services() rebuilds out of a firmware map of
+// Room for the map efi_leave_boot_services() rebuilds out of a firmware map of
 // mmap_size bytes, or 0 if that overflows.
-EFI_UINTN efi_rebuilt_mmap_max_size(EFI_UINTN mmap_size);
+size_t efi_rebuilt_mmap_max_size(size_t mmap_size);
 
 bool is_efi_serial_present(void);
 #endif
@@ -36,7 +36,7 @@ void *get_device_tree_blob(const char *config, size_t extra_size, bool measure,
 
 extern struct volume *boot_volume;
 
-#if defined (BIOS)
+#if defined(BIOS)
 extern bool stage3_loaded;
 #endif
 
@@ -128,28 +128,28 @@ typedef char symbol[];
 
 noreturn void stage3_common(void);
 
-#if defined (__x86_64__) || defined (__i386__)
+#if defined(__x86_64__) || defined(__i386__)
 noreturn void common_spinup(void *fnptr, int args, ...);
-#elif defined (__aarch64__)
+#elif defined(__aarch64__)
 noreturn void enter_in_el1(uint64_t entry, uint64_t sp, uint64_t sctlr,
                            uint64_t mair, uint64_t tcr, uint64_t ttbr0,
                            uint64_t ttbr1, uint64_t target_x0);
 noreturn void enter_in_el2(uint64_t entry, uint64_t sp, uint64_t sctlr,
                            uint64_t mair, uint64_t tcr, uint64_t ttbr0,
                            uint64_t ttbr1, uint64_t target_x0);
-#elif defined (__riscv)
+#elif defined(__riscv)
 noreturn void riscv_spinup(uint64_t entry, uint64_t sp, uint64_t satp, uint64_t direct_map_offset);
-#if defined (UEFI)
-EFI_RISCV_EFI_BOOT_PROTOCOL *get_riscv_boot_protocol(void);
+#if defined(UEFI)
+struct efi_riscv_efi_boot_protocol *get_riscv_boot_protocol(void);
 #endif
-#elif defined (__loongarch64)
+#elif defined(__loongarch64)
 noreturn void loongarch_spinup(uint64_t entry, uint64_t sp, uint64_t pgdl,
                                uint64_t pgdh, uint64_t direct_map_offset);
 #else
 #error Unknown architecture
 #endif
 
-#if defined (UEFI) && defined (__x86_64__)
+#if defined(UEFI) && defined(__x86_64__)
 void prepare_spinup_tramp(void);
 void *spinup_tramp_low(void *hi);
 #endif
@@ -167,9 +167,9 @@ struct mem_range {
 };
 
 static inline const char *current_firmware(void) {
-#if defined (UEFI)
+#if defined(UEFI)
     return "UEFI";
-#elif defined (BIOS)
+#elif defined(BIOS)
     return "BIOS";
 #else
 #error "Unspecified firmware type"

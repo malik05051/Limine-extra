@@ -1,4 +1,4 @@
-#if defined (__x86_64__) || defined (__i386__)
+#if defined(__x86_64__) || defined(__i386__)
 
 #include <stdint.h>
 #include <stddef.h>
@@ -7,6 +7,20 @@
 #include <sys/cpu.h>
 #include <lib/acpi.h>
 #include <lib/libc.h>
+#include <lib/print.h>
+
+#define IOMMU_TIMEOUT_US 1000000
+
+static bool iommu_wait_clear(uintptr_t reg, uint32_t mask) {
+    uint64_t deadline = rdtsc_deadline(IOMMU_TIMEOUT_US);
+    while ((mmind(reg) & mask) != 0) {
+        if (rdtsc_deadline_expired(deadline)) {
+            return false;
+        }
+        asm volatile ("pause");
+    }
+    return true;
+}
 
 // Intel VT-d registers
 #define VTD_GCMD_REG  0x18
@@ -63,8 +77,13 @@ static bool vtd_quiesce_queue(uintptr_t reg_base) {
     }
     mmoutd(reg_base + VTD_IQT_REG, (tail + dsc_size) & (queue_size - 1));
 
+    uint64_t deadline = rdtsc_deadline(IOMMU_TIMEOUT_US);
     while (vtd_wait_status != 1) {
         if (mmind(reg_base + VTD_FSTS_REG) & (VTD_FSTS_IQE | VTD_FSTS_ICE | VTD_FSTS_ITE)) {
+            return false;
+        }
+        if (rdtsc_deadline_expired(deadline)) {
+            print("iommu: VT-d unit at %X does not drain its queue\n", (uint64_t)reg_base);
             return false;
         }
         asm volatile ("pause");
@@ -75,14 +94,21 @@ static bool vtd_quiesce_queue(uintptr_t reg_base) {
 static void vtd_disable_unit(uintptr_t reg_base) {
     uint32_t sts = mmind(reg_base + VTD_GSTS_REG);
 
+    // Bits 22:0 read as 0. Intel VT-d 5.20 section 11.4.4.2.
+    if (sts == 0xffffffff) {
+        print("iommu: VT-d unit at %X does not answer, skipped\n", (uint64_t)reg_base);
+        return;
+    }
+
     // Disable DMA translation first (most urgent: prevents stale lookups)
     if (sts & VTD_GSTS_TES) {
         uint32_t gcmd = (sts & VTD_GCMD_ONESHOT_MASK) & ~VTD_GSTS_TES;
         mmoutd(reg_base + VTD_GCMD_REG, gcmd);
 
-        while ((sts = mmind(reg_base + VTD_GSTS_REG)) & VTD_GSTS_TES) {
-            asm volatile ("pause");
+        if (!iommu_wait_clear(reg_base + VTD_GSTS_REG, VTD_GSTS_TES)) {
+            print("iommu: VT-d unit at %X does not stop translating\n", (uint64_t)reg_base);
         }
+        sts = mmind(reg_base + VTD_GSTS_REG);
     }
 
     // Disable interrupt remapping (depends on QIE, so disable before QIE)
@@ -90,9 +116,12 @@ static void vtd_disable_unit(uintptr_t reg_base) {
         uint32_t gcmd = (sts & VTD_GCMD_ONESHOT_MASK) & ~VTD_GSTS_IRES;
         mmoutd(reg_base + VTD_GCMD_REG, gcmd);
 
-        while ((sts = mmind(reg_base + VTD_GSTS_REG)) & VTD_GSTS_IRES) {
-            asm volatile ("pause");
+        if (!iommu_wait_clear(reg_base + VTD_GSTS_REG, VTD_GSTS_IRES)) {
+            print(
+                "iommu: VT-d unit at %X does not stop remapping interrupts\n", (uint64_t)reg_base
+            );
         }
+        sts = mmind(reg_base + VTD_GSTS_REG);
     }
 
     // Disable queued invalidation last (was prerequisite for IRE). A queue that
@@ -101,8 +130,10 @@ static void vtd_disable_unit(uintptr_t reg_base) {
         uint32_t gcmd = (sts & VTD_GCMD_ONESHOT_MASK) & ~VTD_GSTS_QIES;
         mmoutd(reg_base + VTD_GCMD_REG, gcmd);
 
-        while ((sts = mmind(reg_base + VTD_GSTS_REG)) & VTD_GSTS_QIES) {
-            asm volatile ("pause");
+        if (!iommu_wait_clear(reg_base + VTD_GSTS_REG, VTD_GSTS_QIES)) {
+            print(
+                "iommu: VT-d unit at %X does not stop queued invalidation\n", (uint64_t)reg_base
+            );
         }
     }
 }
@@ -159,6 +190,13 @@ static void amdvi_disable_unit(uintptr_t mmio_base) {
     // Read low 32 bits of the 64-bit control register
     uint32_t ctrl_lo = mmind(mmio_base + AMDVI_CONTROL_REG);
 
+    // Control bits 21:18 read as 0 and status bits 31:19 are reserved. AMD
+    // IOMMU 3.11 sections 3.4.1 and 3.4.16.
+    if (ctrl_lo == 0xffffffff && mmind(mmio_base + AMDVI_STATUS_REG) == 0xffffffff) {
+        print("iommu: AMD-Vi unit at %X does not answer, skipped\n", (uint64_t)mmio_base);
+        return;
+    }
+
     if (!(ctrl_lo & AMDVI_CONTROL_EN)) {
         return; // IOMMU not enabled
     }
@@ -174,11 +212,12 @@ static void amdvi_disable_unit(uintptr_t mmio_base) {
     mmoutd(mmio_base + AMDVI_CONTROL_REG, ctrl_lo);
 
     // The *Run bits are level-sensitive and only drop to 0 once the engine
-    // has actually drained, so wait for them before continuing.
+    // has actually drained, so wait for them before continuing. One that never
+    // stops is turned off all the same.
     const uint32_t run_mask = AMDVI_STATUS_CMDBUF_RUN | AMDVI_STATUS_EVTLOG_RUN |
                               AMDVI_STATUS_PPRLOG_RUN | AMDVI_STATUS_GALOG_RUN;
-    while (mmind(mmio_base + AMDVI_STATUS_REG) & run_mask) {
-        asm volatile ("pause");
+    if (!iommu_wait_clear(mmio_base + AMDVI_STATUS_REG, run_mask)) {
+        print("iommu: AMD-Vi unit at %X does not stop\n", (uint64_t)mmio_base);
     }
 
     ctrl_lo &= ~AMDVI_CONTROL_EN;

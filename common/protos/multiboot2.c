@@ -1,4 +1,4 @@
-#if defined (__x86_64__) || defined (__i386__)
+#if defined(__x86_64__) || defined(__i386__)
 
 #include <stdint.h>
 #include <stddef.h>
@@ -54,14 +54,14 @@ static size_t get_multiboot2_info_size(
         ALIGN_UP(smbios_tag_size, MULTIBOOT_TAG_ALIGN, OVERFLOW) +
         ALIGN_UP(sizeof(struct multiboot_tag_basic_meminfo), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
         ALIGN_UP(sizeof(struct multiboot_tag_mmap) + sizeof(struct multiboot_mmap_entry) * MEMMAP_MAX, MULTIBOOT_TAG_ALIGN, OVERFLOW) +
-        #if defined (UEFI)
+        #if defined(UEFI)
             ALIGN_UP(sizeof(struct multiboot_tag_efi_mmap) + (efi_desc_size * EFI_MEMMAP_MAX), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
-            #if defined (__i386__)
+            #if defined(__i386__)
                 ALIGN_UP(sizeof(struct multiboot_tag_efi32), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
-            #elif defined (__x86_64__)
+            #elif defined(__x86_64__)
                 ALIGN_UP(sizeof(struct multiboot_tag_efi64), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
             #endif
-        #elif defined (BIOS)
+        #elif defined(BIOS)
             ALIGN_UP(sizeof(struct multiboot_tag_bootdev), MULTIBOOT_TAG_ALIGN, OVERFLOW) +
         #endif
         ALIGN_UP(sizeof(struct multiboot_tag_network) + DHCP_ACK_PACKET_LEN, MULTIBOOT_TAG_ALIGN, OVERFLOW) +
@@ -96,7 +96,7 @@ static bool overlaps_loader_memory(uint64_t base, uint64_t top) {
 noreturn void multiboot2_load(char *config, char* cmdline) {
     struct file_handle *kernel_file;
 
-#if defined (UEFI)
+#if defined(UEFI)
     if (cmdline != NULL) {
         tpm_measure(TPM_PCR_BOOT_AUTH, TPM_EV_IPL,
                     cmdline, strlen(cmdline), "cmdline: ", cmdline);
@@ -116,7 +116,7 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
     }
 
     if ((kernel_file = uri_open(kernel_path, MEMMAP_KERNEL_AND_MODULES, false
-#if defined (__i386__)
+#if defined(__i386__)
         , NULL, NULL
 #endif
     )) == NULL)
@@ -126,11 +126,11 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
 
     size_t kernel_file_size = kernel_file->size;
 
-#if defined (BIOS)
+#if defined(BIOS)
     struct volume *kernel_volume = kernel_file->pxe ? NULL : kernel_file->vol;
 #endif
 
-#if defined (UEFI)
+#if defined(UEFI)
     tpm_measure_path(TPM_PCR_BOOT_AUTH, TPM_EV_IPL, "path: ", kernel_path);
     tpm_measure(TPM_PCR_LOADED_IMAGES, TPM_EV_IPL,
                 kernel, kernel_file_size, "path: ", kernel_path);
@@ -182,7 +182,7 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
     bool has_reloc_header = false;
     struct multiboot_header_tag_relocatable reloc_tag = {0};
 
-#if defined (UEFI)
+#if defined(UEFI)
     bool is_framebuffer_declared = false;
     uint32_t console_flags = 0;
 #endif
@@ -236,7 +236,7 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
                         case MULTIBOOT_TAG_TYPE_EFI64_IH:
                             break;
                         case MULTIBOOT_TAG_TYPE_FRAMEBUFFER:
-                        #if defined (UEFI)
+                        #if defined(UEFI)
                             is_framebuffer_declared = true;
                         #endif
                             break;
@@ -260,7 +260,7 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
                 break;
             }
             case MULTIBOOT_HEADER_TAG_CONSOLE_FLAGS: {
-#if defined (UEFI)
+#if defined(UEFI)
                 if (tag->size < sizeof(struct multiboot_header_tag_console_flags))
                     break;
                 struct multiboot_header_tag_console_flags *flags = (void *)tag;
@@ -328,7 +328,7 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
         tag = (struct multiboot_header_tag *)((uintptr_t)tag + tag_stride);
     }
 
-#if defined (UEFI)
+#if defined(UEFI)
     // Neither declaration of framebuffer support, so text is all that is left
     // and UEFI has none. After the loop: either may follow the console tag.
     if ((console_flags & 1) && fbtag == NULL && !is_framebuffer_declared) {
@@ -415,18 +415,21 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
         int bits = elf_bits(kernel, kernel_file_size);
 
         switch (bits) {
-            case 32:
+            case 32: {
                 if (!elf32_load_elsewhere(kernel, kernel_file_size, 0xffffffff,
-                                          &e, &ranges))
+                                          &e, &ranges, &ranges_count)) {
                     panic(true, "multiboot2: ELF32 load failure");
+                }
 
                 section_hdr_info = elf32_section_hdr_info(kernel, kernel_file_size);
                 section_hdr_info_valid = true;
                 break;
+            }
             case 64: {
                 if (!elf64_load_elsewhere(kernel, kernel_file_size, 0xffffffff,
-                                          &e, &ranges))
+                                          &e, &ranges, &ranges_count)) {
                     panic(true, "multiboot2: ELF64 load failure");
+                }
 
                 section_hdr_info = elf64_section_hdr_info(kernel, kernel_file_size);
                 section_hdr_info_valid = true;
@@ -441,9 +444,16 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
         }
     }
 
+    uint64_t kernel_ranges_count = ranges_count;
+
     int64_t reloc_slide = 0;
 
     if (has_reloc_header) {
+        uint64_t orig_base = ranges[0].target;
+        uint64_t image_span = CHECKED_ADD(ranges[kernel_ranges_count - 1].target,
+                                          ranges[kernel_ranges_count - 1].length,
+                                          goto reloc_fail) - orig_base;
+
         // Multiboot 2 gives align 0 no meaning; take it as no constraint.
         if (reloc_tag.align == 0) {
             reloc_tag.align = 1;
@@ -460,19 +470,22 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
 
         switch (reloc_tag.preference) {
             default:
-            case 0: case 1: // No preference / prefer lowest
+            case 0:
+            case 1: { // No preference / prefer lowest
                 reloc_ascend = true;
                 relocated_base = ALIGN_UP(reloc_tag.min_addr, reloc_tag.align, goto reloc_fail);
-                if (CHECKED_ADD(relocated_base, ranges->length, goto reloc_fail) > reloc_tag.max_addr) {
+                uint64_t relocated_top = CHECKED_ADD(relocated_base, image_span, goto reloc_fail);
+                if (relocated_top > reloc_tag.max_addr) {
                     goto reloc_fail;
                 }
                 break;
+            }
             case 2: // Prefer highest
                 reloc_ascend = false;
-                if (ranges->length > reloc_tag.max_addr) {
+                if (image_span > reloc_tag.max_addr) {
                     goto reloc_fail;
                 }
-                relocated_base = ALIGN_DOWN(reloc_tag.max_addr - ranges->length, reloc_tag.align);
+                relocated_base = ALIGN_DOWN(reloc_tag.max_addr - image_span, reloc_tag.align);
                 if (relocated_base < reloc_tag.min_addr) {
                     goto reloc_fail;
                 }
@@ -480,25 +493,30 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
         }
 
         // A small align turns this into a byte-by-byte walk, each step scanning
-        // the memory map. The cap bounds that work, and below page alignment it
-        // bounds the reach with it.
-        uint64_t reloc_tries = 0;
+        // the memory map per segment. The cap counts the scans, so it bounds
+        // that work, and below page alignment the reach with it.
+        uint64_t reloc_checks = 0;
 
         for (;;) {
-            uint64_t relocated_top = CHECKED_ADD(relocated_base, ranges->length, goto reloc_fail);
-
-            if (check_usable_memory(relocated_base, relocated_top)
-             && !overlaps_loader_memory(relocated_base, relocated_top)) {
-                break;
+            int64_t cand_slide = (int64_t)relocated_base - orig_base;
+            for (size_t i = 0; i < kernel_ranges_count; i++) {
+                if (++reloc_checks > 0x100000) {
+                    goto reloc_fail;
+                }
+                uint64_t seg_target = ranges[i].target + cand_slide;
+                uint64_t seg_top = CHECKED_ADD(seg_target, ranges[i].length, goto cand_fail);
+                if (!check_usable_memory(seg_target, seg_top)
+                 || overlaps_loader_memory(seg_target, seg_top)) {
+                    goto cand_fail;
+                }
             }
+            break;
 
-            if (++reloc_tries > 0x100000) {
-                goto reloc_fail;
-            }
-
+cand_fail:
             if (reloc_ascend) {
                 relocated_base += reloc_tag.align;
-                if (CHECKED_ADD(relocated_base, ranges->length, goto reloc_fail) > reloc_tag.max_addr) {
+                uint64_t relocated_top = CHECKED_ADD(relocated_base, image_span, goto reloc_fail);
+                if (relocated_top > reloc_tag.max_addr) {
                     goto reloc_fail;
                 }
             } else {
@@ -509,37 +527,54 @@ noreturn void multiboot2_load(char *config, char* cmdline) {
             }
         }
 
-        reloc_slide = (int64_t)relocated_base - ranges->target;
+        reloc_slide = (int64_t)relocated_base - orig_base;
 
         entry_point += reloc_slide;
 
-        ranges->target = relocated_base;
+        for (size_t i = 0; i < kernel_ranges_count; i++) {
+            ranges[i].target += reloc_slide;
+        }
     }
+
+    bool entry_point_valid = false;
 
     // multiboot_reloc_stub reads the range fields with 32-bit loads, so a
     // target or length it cannot hold is truncated rather than refused.
-    if (ranges->target > 0x100000000
-     || ranges->length > 0xffffffff
-     || ranges->length > 0x100000000 - ranges->target) {
-        panic(true, "multiboot2: Executable does not fit under 4GiB");
-    }
+    for (size_t i = 0; i < kernel_ranges_count; i++) {
+        if (ranges[i].target > 0x100000000
+         || ranges[i].length > 0xffffffff
+         || ranges[i].length > 0x100000000 - ranges[i].target) {
+            panic(true, "multiboot2: Executable does not fit under 4GiB");
+        }
 
-    if (!check_usable_memory(ranges->target, ranges->target + ranges->length)) {
+        if (!check_usable_memory(ranges[i].target, ranges[i].target + ranges[i].length)) {
 reloc_fail:
-        panic(true, "multiboot2: Could not find viable load address for executable");
+            panic(true, "multiboot2: Could not find viable load address for executable");
+        }
     }
 
-    if (entry_point < ranges->target
-     || entry_point >= ranges->target + ranges->length) {
+    for (size_t i = 0; i < kernel_ranges_count; i++) {
+        if (entry_point >= ranges[i].target
+         && entry_point < ranges[i].target + ranges[i].length) {
+            entry_point_valid = true;
+            break;
+        }
+    }
+    if (!entry_point_valid) {
         panic(true, "multiboot2: Entry point is outside the executable");
     }
 
-    // Reserve the kernel's target so later module/info sources can't be
-    // allocated on top of it.
-    elsewhere_reserve_target(ranges->target, ranges->length);
+    // Reserve the whole span, not each segment, which could fill the memory
+    // map, so that nothing allocated later, staging included, can go on top.
+    struct elsewhere_range *last = &ranges[kernel_ranges_count - 1];
+    elsewhere_reserve_target(ranges[0].target, last->target + last->length - ranges[0].target);
+
+    if (addresstag == NULL) {
+        elf_stage_elsewhere(kernel, ranges, kernel_ranges_count);
+    }
 
     // Get the load base address (AKA the lowest target in the ranges)
-    uint64_t load_base_addr = ranges->target;
+    uint64_t load_base_addr = ranges[0].target;
 
     size_t modules_size = 0;
     size_t n_modules;
@@ -594,8 +629,9 @@ reloc_fail:
        + (section_hdr_info_valid ? section_hdr_info.num : 0);
     struct elsewhere_range *new_ranges = ext_mem_alloc_counted(ranges_max, sizeof(struct elsewhere_range));
 
+    // The old array is not freed: taken before the reservation, it may lie in
+    // the kernel's span, where anything reusing it would be copied over.
     memcpy(new_ranges, ranges, sizeof(struct elsewhere_range) * ranges_count);
-    pmm_free(ranges, sizeof(struct elsewhere_range) * ranges_count);
     ranges = new_ranges;
 
     // GRUB allocates boot info at 0x10000, *except* if the kernel happens
@@ -739,7 +775,7 @@ reloc_fail:
 
         struct file_handle *f;
         if ((f = uri_open(module_path, MEMMAP_BOOTLOADER_RECLAIMABLE, false
-#if defined (__i386__)
+#if defined(__i386__)
             , NULL, NULL
 #endif
         )) == NULL)
@@ -753,7 +789,7 @@ reloc_fail:
         void *module_addr = f->fd;
         uint64_t module_target = (uint64_t)-1;
 
-#if defined (UEFI)
+#if defined(UEFI)
         tpm_measure_path(TPM_PCR_BOOT_AUTH, TPM_EV_IPL, "module_path: ", module_path);
         tpm_measure(TPM_PCR_LOADED_IMAGES, TPM_EV_IPL,
                     module_addr, f->size, "module_path: ", module_path);
@@ -817,7 +853,7 @@ reloc_fail:
     //////////////////////////////////////////////
     // Create BIOS boot device tag
     //////////////////////////////////////////////
-#if defined (BIOS)
+#if defined(BIOS)
     // The 0-based partition, all ones where unused (Multiboot2 2.0 section
     // 3.6.4).
     if (kernel_volume != NULL) {
@@ -833,6 +869,12 @@ reloc_fail:
     }
 #endif
 
+    // Load relocation stub where it won't get overwritten: before the
+    // terminal frees memory that may lie in the kernel's span.
+    size_t reloc_stub_size = (size_t)multiboot_reloc_stub_end - (size_t)multiboot_reloc_stub;
+    void *reloc_stub = ext_mem_alloc(reloc_stub_size);
+    memcpy(reloc_stub, multiboot_reloc_stub, reloc_stub_size);
+
     //////////////////////////////////////////////
     // Create framebuffer tag
     //////////////////////////////////////////////
@@ -846,7 +888,7 @@ reloc_fail:
         size_t req_width = 0;
         size_t req_height = 0;
         size_t req_bpp = 0;
-#if defined (BIOS)
+#if defined(BIOS)
         {
             char *textmode_str = config_get_value(config, 0, "TEXTMODE");
             bool textmode = textmode_str != NULL && strcmp(textmode_str, "yes") == 0;
@@ -861,7 +903,7 @@ reloc_fail:
             req_height = fbtag->height;
             req_bpp = fbtag->depth;
 
-#if defined (UEFI)
+#if defined(UEFI)
 modeset:;
 #endif
             char *resolution = config_get_value(config, 0, "RESOLUTION");
@@ -870,9 +912,9 @@ modeset:;
 
             struct fb_info *fbs;
             size_t fbs_count;
-            fb_init(&fbs, &fbs_count, req_width, req_height, req_bpp, false, false);
+            fb_init(&fbs, &fbs_count, req_width, req_height, req_bpp, false, false, false);
             if (fbs_count == 0) {
-#if defined (BIOS)
+#if defined(BIOS)
 textmode:
                 vga_textmode_init(false);
 
@@ -883,7 +925,7 @@ textmode:
                 tag->common.framebuffer_bpp = 16;
                 tag->common.framebuffer_type = MULTIBOOT_FRAMEBUFFER_TYPE_EGA_TEXT;
                 tag->common.size = sizeof(struct multiboot_tag_framebuffer_common);
-#elif defined (UEFI)
+#elif defined(UEFI)
                 // Bit 0 makes a console mandatory, and none can be provided here.
                 if (console_flags & 1) {
                     panic(true, "multiboot2: Failed to set video mode");
@@ -909,21 +951,21 @@ textmode:
                 tag->framebuffer_blue_mask_size = fbs[0].blue_mask_size;
             }
         } else {
-#if defined (UEFI)
+#if defined(UEFI)
             // As GRUB does, set no mode nobody asked for. Only a required
             // console, which can only be a framebuffer here, asks for one.
             if ((console_flags & 1) && is_framebuffer_declared) {
                 goto modeset;
             }
             goto skip_modeset;
-#elif defined (BIOS)
+#elif defined(BIOS)
             goto textmode;
 #endif
         }
 
         append_tag(info_idx, &tag->common);
 
-#if defined (UEFI)
+#if defined(UEFI)
 skip_modeset:;
 #endif
     }
@@ -1006,14 +1048,14 @@ skip_modeset:;
     //////////////////////////////////////////////
     // Create EFI system table info tag
     //////////////////////////////////////////////
-#if defined (UEFI)
+#if defined(UEFI)
     {
-    #if defined (__i386__)
+    #if defined(__i386__)
         uint32_t size = sizeof(struct multiboot_tag_efi32);
         struct multiboot_tag_efi32 *tag = (void *)(mb2_info + info_idx);
 
         tag->type = MULTIBOOT_TAG_TYPE_EFI32;
-    #elif defined (__x86_64__)
+    #elif defined(__x86_64__)
         uint32_t size = sizeof(struct multiboot_tag_efi64);
         struct multiboot_tag_efi64 *tag = (void *)(mb2_info + info_idx);
 
@@ -1027,13 +1069,8 @@ skip_modeset:;
     }
 #endif
 
-    // Load relocation stub where it won't get overwritten (hopefully)
-    size_t reloc_stub_size = (size_t)multiboot_reloc_stub_end - (size_t)multiboot_reloc_stub;
-    void *reloc_stub = ext_mem_alloc(reloc_stub_size);
-    memcpy(reloc_stub, multiboot_reloc_stub, reloc_stub_size);
-
-#if defined (UEFI)
-    efi_exit_boot_services();
+#if defined(UEFI)
+    efi_leave_boot_services();
 #endif
 
     size_t mb_mmap_count;
@@ -1088,7 +1125,7 @@ skip_modeset:;
     //////////////////////////////////////////////
     // Create EFI memory map tag
     //////////////////////////////////////////////
-#if defined (UEFI)
+#if defined(UEFI)
     {
         if ((efi_mmap_size / efi_desc_size) > EFI_MEMMAP_MAX) {
             panic(false, "multiboot2: too many EFI memory map entries");
@@ -1151,7 +1188,7 @@ skip_modeset:;
 
     irq_flush_type = IRQ_PIC_ONLY_FLUSH;
 
-#if defined (UEFI) && defined (__x86_64__)
+#if defined(UEFI) && defined(__x86_64__)
     void *spinup_fn = spinup_tramp_low(multiboot_spinup_32);
 #else
     void *spinup_fn = multiboot_spinup_32;

@@ -1,11 +1,11 @@
-#ifndef LIB__PART_H__
-#define LIB__PART_H__
+#ifndef LIB__PART_H
+#define LIB__PART_H
 
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
 #include <lib/guid.h>
-#if defined (UEFI)
+#if defined(UEFI)
 #  include <efi.h>
 #  include <crypt/blake2b.h>
 #endif
@@ -24,19 +24,19 @@ struct mbr_entry {
 } __attribute__((packed));
 
 struct volume {
-#if defined (UEFI)
-    EFI_HANDLE efi_handle;
+#if defined(UEFI)
+    efi_handle efi_handle;
 
     // Block storage
-    EFI_HANDLE efi_part_handle;
-    EFI_BLOCK_IO_PROTOCOL *block_io;
+    efi_handle efi_part_handle;
+    struct efi_block_io_protocol *block_io;
 
     // PXE
-    EFI_PXE_BASE_CODE_PROTOCOL *pxe_base_code;
+    struct efi_pxe_base_code_protocol *pxe_base_code;
 
     bool unique_sector_valid;
     uint8_t unique_sector_b2b[BLAKE2B_OUT_BYTES];
-#elif defined (BIOS)
+#elif defined(BIOS)
     int drive;
 #endif
 
@@ -93,7 +93,7 @@ int part_get(struct volume *part, struct volume *volume, int partition);
 struct volume *volume_get_by_guid(struct guid *guid);
 struct volume *volume_get_by_fslabel(char *fslabel);
 struct volume *volume_get_by_coord(bool optical, int drive, int partition);
-#if defined (BIOS)
+#if defined(BIOS)
 struct volume *volume_get_by_bios_drive(int drive);
 #endif
 

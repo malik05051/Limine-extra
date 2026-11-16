@@ -1,5 +1,5 @@
-#ifndef LIB__IMAGE_H__
-#define LIB__IMAGE_H__
+#ifndef LIB__IMAGE_H
+#define LIB__IMAGE_H
 
 #include <stdint.h>
 #include <fs/file.h>
@@ -19,9 +19,9 @@ struct image {
     char isQoi;
 };
 
-enum {
-    IMAGE_TILED, IMAGE_CENTERED, IMAGE_STRETCHED
-};
+#define IMAGE_TILED 0
+#define IMAGE_CENTERED 1
+#define IMAGE_STRETCHED 2
 
 void image_make_centered(struct image *image, int frame_x_size, int frame_y_size, uint32_t back_colour);
 void image_make_stretched(struct image *image, int new_x_size, int new_y_size);

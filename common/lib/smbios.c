@@ -1,10 +1,84 @@
-#if defined (UEFI)
-
-#include <stdint.h>
-#include <stddef.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <lib/smbios.h>
 #include <lib/acpi.h>
+
+static size_t smbios_struct_size(struct smbios_struct_header *hdr, size_t remaining) {
+    if (remaining < sizeof(struct smbios_struct_header)
+     || hdr->length < sizeof(struct smbios_struct_header)
+     || hdr->length > remaining) {
+        return 0;
+    }
+
+    const char *string_data = (void *)((uintptr_t)hdr + hdr->length);
+    size_t string_area_max = remaining - hdr->length;
+    size_t i = 1;
+    for (; i < string_area_max && (string_data[i - 1] != '\0' || string_data[i] != '\0'); i++) {}
+    if (i >= string_area_max) {
+        return 0;
+    }
+    return hdr->length + i + 1;
+}
+
+bool smbios_walk_start(struct smbios_walk *walk) {
+    struct smbios_entry_point_32 *smbios_entry_32 = NULL;
+    struct smbios_entry_point_64 *smbios_entry_64 = NULL;
+    acpi_get_smbios((void **)&smbios_entry_32, (void **)&smbios_entry_64);
+
+    void *table = NULL;
+    walk->length = 0;
+    walk->count = 0;
+
+    if (smbios_entry_64 != NULL) {
+        table = smbios_get_table(
+            smbios_entry_64->table_address, smbios_entry_64->table_maximum_size
+        );
+        walk->length = smbios_entry_64->table_maximum_size;
+    }
+    if (table == NULL && smbios_entry_32 != NULL) {
+        table = smbios_get_table(smbios_entry_32->table_address, smbios_entry_32->table_length);
+        walk->count = smbios_entry_32->number_of_structures;
+        walk->length = smbios_entry_32->table_length;
+    }
+
+    walk->table = (uintptr_t)table;
+    walk->offset = 0;
+    walk->index = 0;
+    return table != NULL && walk->length != 0;
+}
+
+struct smbios_struct_header *smbios_walk_next(struct smbios_walk *walk, size_t *size) {
+    if (walk->count != 0 && walk->index >= walk->count) {
+        return NULL;
+    }
+
+    size_t remaining = walk->length - walk->offset;
+    if (remaining < sizeof(struct smbios_struct_header)) {
+        return NULL;
+    }
+
+    struct smbios_struct_header *hdr = (void *)(walk->table + walk->offset);
+
+    // SMBIOS 3.9 section 7.49 has End-of-Table used like an Inactive
+    // structure, the whole table staying indexable, so stop at it only
+    // when there is no structure count to go by.
+    if (hdr->type == 127 && walk->count == 0) {
+        return NULL;
+    }
+
+    *size = smbios_struct_size(hdr, remaining);
+    if (*size == 0) {
+        return NULL;
+    }
+
+    walk->offset += *size;
+    walk->index++;
+    return hdr;
+}
+
+#if defined(UEFI)
+
 #include <lib/bli.h>
 #include <lib/libc.h>
 #include <lib/misc.h>
@@ -13,97 +87,30 @@
 
 // Event tags shared with systemd, so that a policy written against one boot
 // loader's log reads the other's.
-#define SMBIOS_TYPE1_EVENT_TAG_ID  0xd5cb7cbc
-#define SMBIOS_TYPE2_EVENT_TAG_ID  0xe0d47bc8
+#define SMBIOS_TYPE1_EVENT_TAG_ID 0xd5cb7cbc
+#define SMBIOS_TYPE2_EVENT_TAG_ID 0xe0d47bc8
 #define SMBIOS_TYPE11_EVENT_TAG_ID 0xc0b3bd23
-
-#define SMBIOS_TYPE_END_OF_TABLE 127
-
-struct smbios_header {
-    uint8_t type;
-    uint8_t length;
-    uint8_t handle[2];
-} __attribute__((packed));
 
 // The wake-up type of a type 1 structure says how the machine was powered on,
 // so it differs between a cold boot and a resume and would make the digest
 // unreproducible.
 #define SMBIOS_TYPE1_WAKE_UP_TYPE_OFFSET 24
 
-static const uint8_t *smbios_table(size_t *size_out) {
-    void *ep32 = NULL, *ep64 = NULL;
-    acpi_get_smbios(&ep32, &ep64);
-
-    if (ep64 != NULL) {
-        struct smbios_entry_point_64 *ep = ep64;
-        *size_out = ep->table_maximum_size;
-        return (const uint8_t *)(uintptr_t)ep->table_address;
-    }
-
-    if (ep32 != NULL) {
-        struct smbios_entry_point_32 *ep = ep32;
-        *size_out = ep->table_length;
-        return (const uint8_t *)(uintptr_t)ep->table_address;
-    }
-
-    return NULL;
-}
-
-// One structure is a fixed formatted area followed by a set of strings ending
-// in a second NUL. Returns where the next structure starts, or NULL if this
-// one runs past the end of the table.
-static const uint8_t *smbios_structure_end(const uint8_t *p, size_t size) {
-    if (size < sizeof(struct smbios_header)) {
-        return NULL;
-    }
-
-    const struct smbios_header *header = (const struct smbios_header *)p;
-    if (size < header->length || header->length < sizeof(struct smbios_header)) {
-        return NULL;
-    }
-
-    const uint8_t *q = p + header->length;
-    size -= header->length;
-
-    // A structure with no strings at all still carries the two terminators.
-    if (size >= 2 && q[0] == 0 && q[1] == 0) {
-        return q + 2;
-    }
-
-    bool first = true;
-    for (;;) {
-        const uint8_t *e = memchr(q, 0, size);
-        if (e == NULL) {
-            return NULL;
-        }
-
-        if (!first && e == q) {
-            return q + 1;
-        }
-
-        size -= (size_t)(e + 1 - q);
-        q = e + 1;
-        first = false;
-    }
-}
-
-static void smbios_measure_type1(const struct smbios_header *header, size_t size,
-                                 bool *measured) {
-    const void *p = header;
+static void smbios_measure_type1(const struct smbios_struct_header *hdr, size_t size) {
+    const void *p = hdr;
     uint8_t *copy = NULL;
 
     // Whether the field exists at all is governed by the formatted area's
     // length, which comes from firmware and cannot be assumed.
-    if (header->length > SMBIOS_TYPE1_WAKE_UP_TYPE_OFFSET) {
+    if (hdr->length > SMBIOS_TYPE1_WAKE_UP_TYPE_OFFSET) {
         copy = ext_mem_alloc(size);
-        memcpy(copy, header, size);
+        memcpy(copy, hdr, size);
         copy[SMBIOS_TYPE1_WAKE_UP_TYPE_OFFSET] = 0;
         p = copy;
     }
 
     tpm_measure_tagged(TPM_PCR_PLATFORM_CONFIG, SMBIOS_TYPE1_EVENT_TAG_ID,
                        p, size, "smbios:type1");
-    *measured = true;
 
     if (copy != NULL) {
         pmm_free(copy, size);
@@ -121,46 +128,31 @@ void smbios_measure(void) {
         return;
     }
 
-    size_t size;
-    const uint8_t *p = smbios_table(&size);
-    if (p == NULL) {
+    struct smbios_walk walk;
+    if (!smbios_walk_start(&walk)) {
         return;
     }
 
     bool measured = false;
+    struct smbios_struct_header *hdr;
+    size_t size;
 
-    for (;;) {
-        if (size < sizeof(struct smbios_header)) {
-            break;
-        }
-
-        const struct smbios_header *header = (const struct smbios_header *)p;
-
-        if (header->type == SMBIOS_TYPE_END_OF_TABLE) {
-            break;
-        }
-
-        const uint8_t *next = smbios_structure_end(p, size);
-        if (next == NULL) {
-            break;
-        }
-
-        size_t structure_size = (size_t)(next - p);
-
-        switch (header->type) {
+    while ((hdr = smbios_walk_next(&walk, &size)) != NULL) {
+        switch (hdr->type) {
             case 1: {
-                smbios_measure_type1(header, structure_size, &measured);
+                smbios_measure_type1(hdr, size);
+                measured = true;
                 break;
             }
             case 2: {
                 tpm_measure_tagged(TPM_PCR_PLATFORM_CONFIG, SMBIOS_TYPE2_EVENT_TAG_ID,
-                                   header, structure_size, "smbios:type2");
+                                   hdr, size, "smbios:type2");
                 measured = true;
                 break;
             }
             case 11: {
                 tpm_measure_tagged(TPM_PCR_PLATFORM_CONFIG, SMBIOS_TYPE11_EVENT_TAG_ID,
-                                   header, structure_size, "smbios:type11");
+                                   hdr, size, "smbios:type11");
                 measured = true;
                 break;
             }
@@ -168,9 +160,6 @@ void smbios_measure(void) {
                 break;
             }
         }
-
-        size -= structure_size;
-        p = next;
     }
 
     if (measured) {
