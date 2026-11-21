@@ -60,6 +60,8 @@ static void keyboard_layout_init(void) {
         current_keyboard_layout = KEYBOARD_LAYOUT_DVORAK;
     } else if (layout != NULL && strcasecmp(layout, "azerty") == 0) {
         current_keyboard_layout = KEYBOARD_LAYOUT_AZERTY;
+    } else if (layout != NULL && strcasecmp(layout, "qwertz") == 0) {
+        current_keyboard_layout = KEYBOARD_LAYOUT_QWERTZ;
     } else {
         current_keyboard_layout = KEYBOARD_LAYOUT_QWERTY;
     }
@@ -2500,12 +2502,16 @@ timeout_aborted:
                 selected_entry = max_entries - 1;
                 goto refresh;
             case GETCHAR_CURSOR_UP:
+            case 'k':
+            case 'K':
                 if (selected_entry == 0)
                     selected_entry = max_entries - 1;
                 else
                     selected_entry--;
                 goto refresh;
             case GETCHAR_CURSOR_DOWN:
+            case 'j':
+            case 'J':
                 if (++selected_entry == max_entries)
                     selected_entry = 0;
                 goto refresh;
@@ -2550,7 +2556,38 @@ timeout_aborted:
                 mouse_render_pointer();
                 break;
             }
+            case GETCHAR_CURSOR_LEFT:
+            case 'h':
+            case 'H': {
+                if (max_entries == 0) {
+                    break;
+                }
+                if (selected_menu_entry->sub != NULL && selected_menu_entry->expanded) {
+                    selected_menu_entry->expanded = false;
+                    goto refresh;
+                }
+                struct menu_entry *parent = selected_menu_entry->parent;
+                if (parent == NULL) {
+                    break;
+                }
+                // Back past the siblings before this entry and all they have
+                // expanded, then one more row to the parent's.
+                struct menu_entry *sibling = parent->sub;
+                for (; sibling != selected_menu_entry; sibling = sibling->next) {
+                    if (should_skip_entry(sibling)) {
+                        continue;
+                    }
+                    selected_entry--;
+                    if (sibling->sub != NULL && sibling->expanded) {
+                        selected_entry -= count_visible_entries(sibling->sub);
+                    }
+                }
+                selected_entry--;
+                goto refresh;
+            }
             case GETCHAR_CURSOR_RIGHT:
+            case 'l':
+            case 'L':
             case '\n':
             case ' ':
             autoboot:

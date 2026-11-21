@@ -125,6 +125,59 @@ def menu_directories(t):
 
 
 @check(ports=ALL_PORTS, tags=['menu'])
+def menu_vim_keys(t):
+    """J and K move the selection as Down and Up do, and L expands and
+    collapses a directory and boots an entry as Right does, in either case
+    [intent]."""
+    m = boot_menu(t, tree_menu())
+    wait_menu(t, m)
+    m.type_text('jJ')
+    t.wait_text(m, 'an inner comment')
+    m.type_text('jj')
+    t.wait_text(m, 'ENTER Expand')
+    m.type_text('l')
+    t.wait_text(m, 'Hidden Child')
+    m.type_text('L')
+    t.wait_screen(m, lambda s: 'Hidden Child' not in screen_text(s), desc='Collapsed collapsed')
+    m.type_text('kK')
+    t.wait_text(m, 'an inner comment')
+    m.type_text('l')
+    t.expect_eq(booted_cmdline(t, m), 'inner one', 'L booted the selected entry')
+
+
+@check(ports=ALL_PORTS, tags=['menu'])
+def menu_left_keys(t):
+    """Left, H, and h collapse an expanded directory, and in a directory
+    select it, past expanded siblings; at the top level they do nothing, and
+    Right still toggles a directory [intent]."""
+    config = ('timeout: no\n' + menu_entry(1, 'First', 'first') + menu_entry(1, '+Outer')
+              + menu_entry(2, '+Middle') + menu_entry(3, 'Deep One', 'deep one')
+              + menu_entry(3, 'Deep Two', 'deep two', 'the deep comment')
+              + menu_entry(2, 'After', 'after', 'the after comment') + menu_entry(1, 'Last', 'last'))
+    m = boot_menu(t, config)
+    wait_menu(t, m)
+    m.press('down', 'down', 'down', 'down', 'down')
+    t.wait_text(m, 'the after comment')
+    m.press('left')
+    m.type_text('h')
+    t.wait_screen(m, lambda s: '[+] Outer' in screen_text(s) and 'After' not in screen_text(s),
+                  desc='Outer selected from After and collapsed')
+    m.type_text('H')
+    m.press('right')
+    t.wait_text(m, 'Deep One')
+    m.press('down', 'down', 'down')
+    t.wait_text(m, 'the deep comment')
+    m.type_text('h')
+    m.press('left')
+    t.wait_screen(m, lambda s: 'Deep One' not in screen_text(s) and 'After' in screen_text(s),
+                  desc='Middle selected from Deep Two and collapsed')
+    m.press('left', 'down', 'down')
+    t.wait_text(m, 'the after comment')
+    m.press('ret')
+    t.expect_eq(booted_cmdline(t, m), 'after', 'Left went from Middle to Outer, two rows above After')
+
+
+@check(ports=ALL_PORTS, tags=['menu'])
 def menu_countdown(t):
     """With a timeout the default entry boots after the countdown; a key
     pressed during it stops it."""
@@ -254,7 +307,7 @@ def menu_keyboard_layout(t):
     before the menu and the editor see it: on Dvorak the key in QWERTY's D
     place is E, the edit key. An unknown layout remaps nothing."""
     for layout, edit, typed, expect in (('dvorak', 'd', 'jdpps', 'hello'), ('azerty', 'e', 'qwaz;', 'azqwm'),
-                                        ('colemak', 'e', 'jdpps', 'jdpps')):
+                                        ('qwertz', 'e', 'yzY/]', 'zyZ-+'), ('colemak', 'e', 'jdpps', 'jdpps')):
         m = boot_menu(t, f'timeout: no\nkeyboard_layout: {layout}\n' + menu_entry(1, 'Only', 'x'))
         wait_menu(t, m)
         m.press(edit)

@@ -53,6 +53,11 @@ static inline void set_cursor_pos_helper(size_t x, size_t y) {
 
 void term_notready(void);
 void term_fallback(void);
+void term_set_text_fg_nearest(struct flanterm_context *ctx, uint32_t rgb);
+void term_set_text_bg_nearest(struct flanterm_context *ctx, uint32_t rgb);
+#if defined(BIOS)
+void term_serial_out(uint8_t b);
+#endif
 #if defined(UEFI)
 void term_prepare_post_ebs(void);
 #endif
